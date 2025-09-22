@@ -197,8 +197,8 @@ Figure 14 and 15
 | bolt15us_ws30perc_0.3s_1q.txt, SIMTIME 0.5sec                      | 8+hrs  | ~12GB  |
 | xpass55us_ws30perc_0.3s_80c_40a_05winit.txt, SIMTIME 0.5sec        | 12+hrs | ~32GB  |
 | xpass15us_ws30perc_0.3s_20c_8a_05winit.txt, SIMTIME 0.5sec         | 12+hrs | ~32GB  |
-| hbh55us_ws30perc_0.3s_10P_5D_30perc.txt, SIMTIME 0.5sec            | 48+hrs | ~16GB  |
-| hbh15us_ws30perc_0.3s_6P_2D_30perc.txt, SIMTIME 0.5sec             | 48+hrs | ~16GB  |
+| hbh55us_ws30perc_0.3s_10P_5D.txt, SIMTIME 0.5sec            | 48+hrs | ~16GB  |
+| hbh15us_ws30perc_0.3s_6P_2D.txt, SIMTIME 0.5sec             | 48+hrs | ~16GB  |
 | tdtcp55us_ws30perc_0.3s_40ecn_nosyn_10cwnd.txt, SIMTIME 0.5sec     | 6+hrs  | ~12GB  |
 | ndp55us_ws30perc_0.3s_80q.txt, SIMTIME 0.5sec                      | 16+hrs | ~128GB |
 | [Raw files](https://ncs-flare-project.mpi-inf.mpg.de/resources/Fig14_15_raw.tgz)     |
@@ -212,8 +212,8 @@ Figure 16
 | bolt15us_had30perc_0.3s_1q.txt, SIMTIME 0.5sec                     | 12+hrs | ~32GB  |
 | xpass55us_had30perc_0.3s_80c_40a_05winit.txt, SIMTIME 0.5sec       | 12+hrs | ~64GB  |
 | xpass15us_had30perc_0.3s_20c_8a_05winit.txt, SIMTIME 0.5sec        | 12+hrs | ~64GB  |
-| hbh55us_had30perc_0.3s_10P_5D_30perc.txt, SIMTIME 0.5sec           | 72+hrs | ~16GB  |
-| hbh15us_had30perc_0.3s_6P_2D_30perc.txt, SIMTIME 0.5sec            | 72+hrs | ~16GB  |
+| hbh55us_had30perc_0.3s_10P_5D.txt, SIMTIME 0.5sec           | 72+hrs | ~16GB  |
+| hbh15us_had30perc_0.3s_6P_2D.txt, SIMTIME 0.5sec            | 72+hrs | ~16GB  |
 | tdtcp55us_had30perc_0.3s_40ecn_nosyn_10cwnd.txt, SIMTIME 0.5sec    | 8+hrs  | ~32GB  |
 | [Raw files](https://ncs-flare-project.mpi-inf.mpg.de/resources/Fig16_raw.tgz)        |
 
@@ -226,8 +226,8 @@ Figure 17
 | bolt15us_rpc30perc_0.3s_1q.txt, SIMTIME 0.5sec                     | 8+hrs  | ~12GB  |
 | xpass55us_rpc30perc_0.3s_80c_40a_05winit.txt, SIMTIME 0.5sec       | 12+hrs | ~32GB  |
 | xpass15us_rpc30perc_0.3s_20c_8a_05winit.txt, SIMTIME 0.5sec        | 12+hrs | ~32GB  |
-| hbh55us_rpc30perc_0.3s_10P_5D_30perc.txt, SIMTIME 0.5sec           | 48+hrs | ~16GB  |
-| hbh15us_rpc30perc_0.3s_6P_2D_30perc.txt, SIMTIME 0.5sec            | 48+hrs | ~16GB  |
+| hbh55us_rpc30perc_0.3s_10P_5D.txt, SIMTIME 0.5sec           | 48+hrs | ~16GB  |
+| hbh15us_rpc30perc_0.3s_6P_2D.txt, SIMTIME 0.5sec            | 48+hrs | ~16GB  |
 | tdtcp55us_rpc30perc_0.3s_40ecn_nosyn_10cwnd.txt, SIMTIME 0.5sec    | 6+hrs  | ~12GB  |
 | [Raw files](https://ncs-flare-project.mpi-inf.mpg.de/resources/Fig17_raw.tgz)        |
 
