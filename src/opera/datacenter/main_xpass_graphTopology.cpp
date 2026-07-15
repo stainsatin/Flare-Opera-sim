@@ -38,6 +38,43 @@ uint32_t delay_ToR2ToR = 500; // ns
 string ntoa(double n);
 string itoa(uint64_t n);
 
+map<int,double> read_probfun(const string& fname) {
+    map<int,double> hop_to_prob;
+    ifstream input(fname);
+    if (!input.is_open()) {
+        cout << "Could not open probability file " << fname << endl;
+        exit(1);
+    }
+    int hops;
+    double probability;
+    while (input >> hops >> probability) {
+        hop_to_prob[hops] = probability;
+    }
+    return hop_to_prob;
+}
+
+void report_credit_stats(GraphTopology* top) {
+    cout << "# CreditStats scope id port received transmitted queued max_queued "
+         << "dropped overflow timeout shaping tentative" << endl;
+    cout << "# DataQueueStats scope id port dropped" << endl;
+    for (int host = 0; host < top->no_of_nodes(); host++) {
+        CreditQueue* queue = dynamic_cast<CreditQueue*>(top->get_queue_serv_tor(host));
+        assert(queue);
+        queue->reportCreditStats("host", host, -1);
+        cout << "DataQueueStats host " << host << " -1 "
+             << queue->num_drops() << endl;
+    }
+    for (int tor = 0; tor < top->no_of_tors(); tor++) {
+        for (int port = 0; port < top->no_of_hpr() + top->no_of_uplinks(); port++) {
+            CreditQueue* queue = dynamic_cast<CreditQueue*>(top->get_queue_tor(tor, port));
+            assert(queue);
+            queue->reportCreditStats("tor", tor, port);
+            cout << "DataQueueStats tor " << tor << " " << port << " "
+                 << queue->num_drops() << endl;
+        }
+    }
+}
+
 EventList eventlist;
 Logfile* lg;
 
@@ -62,10 +99,11 @@ int main(int argc, char **argv) {
     double target_loss = 0.1; //target credit waste ratio
     double w_init = 0.5; //initial credit pull rate ratio (w.r.t bandwdith)
     bool fb_sens = false; //weight feedback adjustment with prob function
-    bool is_flare = false; //false=flare, true=xpass
-    int jit_k = -1; //jittering K value
+    bool is_flare = false; // false=ExpressPass, true=Flare
+    int jit_a = -1;
+    int jit_b = -1;
     double fb_w_factor = 2.0; //weight adjustment factor
-    double simtime; // seconds
+    double simtime = 0.01; // seconds
     double utiltime=1.0; // milliseconds
     double tp_sampling= 0.0; //milliseconds
     map<int,double> hops_to_prob = {{1,1.0},{2,1.0},{3,1.0},{4,1.0},{5,1.0}};
@@ -101,12 +139,22 @@ int main(int argc, char **argv) {
 	    fb_w_factor = atof(argv[i+1]);
 	    i++;
 	} else if (!strcmp(argv[i],"-jitk")){
-	    jit_k = atoi(argv[i+1]);
+	    jit_a = atoi(argv[i+1]);
+	    jit_b = jit_a;
+	    i++;
+	} else if (!strcmp(argv[i],"-jita")){
+	    jit_a = atoi(argv[i+1]);
+	    i++;
+	} else if (!strcmp(argv[i],"-jitb")){
+	    jit_b = atoi(argv[i+1]);
 	    i++;
 	} else if (!strcmp(argv[i],"-fbsens")){
 	    fb_sens = true;
 	} else if (!strcmp(argv[i],"-flare")){
 	    is_flare = true;
+	} else if (!strcmp(argv[i],"-probfile")) {
+	    hops_to_prob = read_probfun(argv[i+1]);
+	    i++;
 	} else if (!strcmp(argv[i],"-strat")){
 	    if (!strcmp(argv[i+1], "perm")) {
 			route_strategy = SCATTER_PERMUTE;
@@ -143,7 +191,13 @@ int main(int argc, char **argv) {
         exit_error(argv[0]);
       i++;
     }
+    fast_srand(13);
     srand(13);
+
+    if (topfile.empty() || flowfile.empty()) {
+        cout << "Both -topfile and -flowfile are required" << endl;
+        exit(1);
+    }
 
 
     eventlist.setEndtime(timeFromSec(simtime));
@@ -183,6 +237,7 @@ int main(int argc, char **argv) {
         {"ae_thresh",aeolus_thresh},{"te_thresh",tent_thresh}};
     GraphTopology* top = new GraphTopology(queuesize, &logfile, &eventlist, 
         CREDIT, topfile, params);
+    top->set_prob_hops(hops_to_prob);
 
     // initialize all sources/sinks
     XPassSrc::setMinRTO(1000); //increase RTO to avoid spurious retransmits
@@ -192,7 +247,7 @@ int main(int argc, char **argv) {
     if (input.is_open()){
         string line;
         int64_t temp;
-        // get flows. Format: (src) (dst) (bytes) (starttime microseconds)
+        // get flows. Format: (src) (dst) (bytes) (start time in nanoseconds)
         while(!input.eof()){
             vector<int64_t> vtemp;
             getline(input, line);
@@ -200,6 +255,16 @@ int main(int argc, char **argv) {
             stringstream stream(line);
             while (stream >> temp)
                 vtemp.push_back(temp);
+            if (vtemp.size() != 4) {
+                cout << "Invalid flow row (expected src dst bytes start_ns): " << line << endl;
+                exit(1);
+            }
+            if (vtemp[0] < 0 || vtemp[0] >= top->no_of_nodes() ||
+                vtemp[1] < 0 || vtemp[1] >= top->no_of_nodes() ||
+                vtemp[0] == vtemp[1] || vtemp[2] <= 0 || vtemp[3] < 0) {
+                cout << "Invalid flow values: " << line << endl;
+                exit(1);
+            }
             cout << "src = " << vtemp[0] << " dest = " << vtemp[1] << " bytes " << vtemp[2] << " time " << vtemp[3] << endl;
             
             // source and destination hosts for this flow
@@ -213,15 +278,19 @@ int main(int argc, char **argv) {
             XPassSink* flowSnk = new XPassSink(eventlist);
             flowSnk->set_w_init(w_init);
             flowSnk->set_target_loss(target_loss);
-            flowSnk->set_w_init(w_init);
             flowSnk->set_fb_w_factor(fb_w_factor);
             flowSnk->set_fb_sens(fb_sens);
+            flowSnk->set_jit_alpha(jit_a);
+            flowSnk->set_jit_beta(jit_b);
             flowSnk->set_tp_sampling(timeFromMs(tp_sampling));
             xpassRtxScanner.registerXPass(*flowSrc);
 
             flowSrc->connect(*flowSnk, timeFromNs(vtemp[3]/1.));
 
         }
+    } else {
+        cout << "Could not open flow file " << flowfile << endl;
+        exit(1);
     }
 
 
@@ -240,6 +309,7 @@ int main(int argc, char **argv) {
 
     // GO!
     while (eventlist.doNextEvent()) { }
+    report_credit_stats(top);
 
 }
 

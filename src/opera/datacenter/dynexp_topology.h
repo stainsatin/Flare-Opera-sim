@@ -94,6 +94,7 @@ class DynExpTopology: public Topology{
   int no_of_nodes() const {return _no_of_nodes;} // number of servers
   int no_of_tors() const {return _ntor;} // number of racks
   int no_of_hpr() const {return _ndl;} // number of hosts per rack = number of downlinks
+  int no_of_uplinks() const {return _nul;}
 
   void inc_packets() { _total_packets++; _total_packets_sample++;}
   uint64_t get_all_packets() { return _total_packets; }
@@ -129,10 +130,10 @@ class DynExpTopology: public Topology{
   mem_b _queuesize; // queue sizes
   //<hops>-><prob> for flare
   map<int,double> _hops_to_prob;
-  uint64_t _total_packets;
-  uint64_t _total_packets_sample;
-  uint64_t _total_losses;
-  uint64_t _total_losses_sample;
+  uint64_t _total_packets = 0;
+  uint64_t _total_packets_sample = 0;
+  uint64_t _total_losses = 0;
+  uint64_t _total_losses_sample = 0;
 };
 
 #endif

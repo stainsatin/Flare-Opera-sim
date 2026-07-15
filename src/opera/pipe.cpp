@@ -435,7 +435,8 @@ void UtilMonitor::printAggUtil() {
     }
     //uplink queues
     for (int tor = 0; tor < _top->no_of_tors(); tor++) {
-        for (int uplink = 0; uplink < _top->no_of_hpr()*2; uplink++) {
+        for (int uplink = 0;
+             uplink < _top->no_of_hpr() + _top->no_of_uplinks(); uplink++) {
             Queue* q = _top->get_queue_tor(tor, uplink);
             if(q){
             q->reportMaxqueuesize();

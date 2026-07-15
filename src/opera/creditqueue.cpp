@@ -52,7 +52,13 @@ CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _last_cred_t = 0;
   _last_cred_tx_t = 0;
   _tot_creds = 0;
+  _tx_creds = 0;
   _drop_creds = 0;
+  _drop_overflow = 0;
+  _drop_timeout = 0;
+  _drop_shaping = 0;
+  _drop_tentative = 0;
+  _max_cred_queue = 0;
   _next_sched_tx = NO_PENDING_TX;
   _tx_next = NONE;
   _cred_tx_pending = false;
@@ -125,6 +131,9 @@ inline int CreditQueue::next_cred() {
         // else packet expired, drop and try next
         assert(_queuesize_cred[i] > 0);
         _queuesize_cred[i] -= p->size();
+        _hops_to_creds[max((p->get_maxhops() - p->get_crthop()), 1)] -= 1;
+        _drop_creds++;
+        _drop_timeout++;
         p->free();
         _enqueued_cred[i].pop_back();
       }
@@ -170,15 +179,16 @@ static double hops_to_chance_exp(int hops) {
   return chance;
 }
 
-void CreditQueue::handleCredit(Packet &pkt) {
+bool CreditQueue::handleCredit(Packet &pkt) {
   assert(pkt.type() == XPCREDIT);
   int prio = credit_prio(pkt);
   if (queuesize_cred(prio) > _max_tent_cred &&
       ((XPassPull *)&pkt)->tentative()) {
     // cout << nodename() << " TENTATIVE DROPPED for " << pkt.flow_id() << endl;
+    _drop_creds++;
+    _drop_tentative++;
     pkt.free();
-    //_drop_creds++;
-    return;
+    return false;
   }
   if(((XPassPull*)&pkt)->get_xpsrc()->_is_flare) {
       if (queuesize_cred(prio) > _shaping_thresh) {
@@ -200,7 +210,8 @@ void CreditQueue::handleCredit(Packet &pkt) {
               __global_network_tot_cred_waste += pkt.get_crthop();
               pkt.free();
               _drop_creds++;
-              return;
+              _drop_shaping++;
+              return false;
           }
       }
   }
@@ -208,9 +219,11 @@ void CreditQueue::handleCredit(Packet &pkt) {
   pkt.set_tmp_ts(eventlist().now() + _cred_timeout);
   _enqueued_cred[prio].push_front(&pkt);
   _queuesize_cred[prio] += pkt.size();
+  _max_cred_queue = max(_max_cred_queue, queuesize_cred());
   _hops_to_creds[max((pkt.get_maxhops() - pkt.get_crthop()), 1)] += 1;
   // measure in term of data packet size
   pkt.inc_queueing(_enqueued_cred[prio].size() * 1500);
+  return true;
 }
 
 void CreditQueue::receivePacket(Packet &pkt) {
@@ -230,12 +243,13 @@ void CreditQueue::receivePacket(Packet &pkt) {
       // if the credit doesn't fit in the queue, drop it
       // cout << nodename() << " CREDIT DROPPED (overflow) for " <<
       // pkt.flow_id() << endl;
-      pkt.free();
       __global_network_tot_cred_waste += pkt.get_crthop();
+      pkt.free();
       _drop_creds++;
+      _drop_overflow++;
       return;
     }
-    handleCredit(pkt);
+    if (!handleCredit(pkt)) return;
   } else {
     // cout << "xpdata\n";
     if (_queuesize + pkt.size() > _maxsize) {
@@ -249,11 +263,11 @@ void CreditQueue::receivePacket(Packet &pkt) {
       }
       cout << nodename() << " DROPPED " << _queuesize << " " << pkt.size()
            << " " << _top->time_to_slice(eventlist().now()) << endl;
-      pkt.free();
       if(pkt.type() == XPDATA) {
           XPassPacket *xppkt = (XPassPacket*)&pkt;
           xppkt->get_xpsrc()->setFinished();
       }
+      pkt.free();
       _num_drops++;
       return;
     }
@@ -330,6 +344,7 @@ void CreditQueue::completeService() {
     _enqueued_cred[prio].pop_back();
     updatePktOut(pkt->flow_id());
     _queuesize_cred[prio] -= pkt->size();
+    _tx_creds++;
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
     assert(_hops_to_creds[pkt->get_tidalhop()] >= 0);
     _last_cred_tx_t = eventlist().now();
@@ -366,6 +381,14 @@ void CreditQueue::doNextEvent() {
 
 void CreditQueue::reportLoss() {
   cout << " " << _tot_creds << " " << _drop_creds;
+}
+
+void CreditQueue::reportCreditStats(const string& scope, int id, int port) {
+  cout << "CreditStats " << scope << " " << id << " " << port << " "
+       << _tot_creds << " " << _tx_creds << " " << queuesize_cred() / 64
+       << " " << _max_cred_queue / 64 << " " << _drop_creds << " "
+       << _drop_overflow << " " << _drop_timeout << " " << _drop_shaping
+       << " " << _drop_tentative << endl;
 }
 
 void CreditQueue::reportMaxqueuesize() {
@@ -408,6 +431,7 @@ void NICCreditQueue::completeService() {
     _enqueued_cred[prio].pop_back();
     updatePktOut(pkt->flow_id());
     _queuesize_cred[prio] -= pkt->size();
+    _tx_creds++;
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
     _last_cred_tx_t = eventlist().now();
     updatePktOut(pkt->flow_id());

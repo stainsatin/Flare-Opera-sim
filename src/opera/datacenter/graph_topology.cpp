@@ -42,93 +42,118 @@ GraphTopology::GraphTopology(mem_b queuesize, Logfile* lg, EventList* ev,queue_t
 }
 
 GraphTopology::GraphTopology(mem_b queuesize, Logfile* lg, EventList* ev,queue_type q, string topfile) 
-  : DynExpTopology(queuesize, lg, ev, q, (map<string,uint64_t>){})
-{
-    GraphTopology(queuesize, lg, ev, q, topfile, (map<string,uint64_t>){});
-}
+  : GraphTopology(queuesize, lg, ev, q, topfile, map<string,uint64_t>()) {}
 
 // read the topology info from file (generated in Matlab)
 void GraphTopology::read_params(string topfile) {
 
   ifstream input(topfile);
 
-  if (input.is_open()){
-
-    // read the first line of basic parameters:
-    string line;
-    getline(input, line);
-    stringstream stream(line);
-    stream >> _ntor;
-    stream >> _ndl;
-    _no_of_nodes = _ntor*_ndl;
-
-    int node;
-    _adjacency.resize(_ntor);
-    for (int i = 0; i < _ntor; i++) {
-      int port = _ndl;
-      getline(input, line);
-      stringstream stream(line);
-      while(stream >> node){
-        _adjacency[i].push_back(node);
-        _adj_to_port[{i,node}] = port++;
-      }
-    }
-
-
-    // get label switched paths (rest of file)
-    _lbls.resize(_ntor);
-    for (int i = 0; i < _ntor; i++) {
-      _lbls[i].resize(_ntor);
-    }
-
-    _connected_slices.resize(_ntor);
-    for (int i = 0; i < _ntor; i++) {
-      _connected_slices[i].resize(_ntor);
-    }
-
-    for (int i = 0; i < _nslice; i++) {
-      for (int j = 0; j < _nul*_ntor; j++) {
-        int src_tor = uplink_to_tor(j);
-        int dst_tor = _adjacency[i][j];
-        if(dst_tor >= 0)
-            _connected_slices[src_tor][dst_tor].push_back(make_pair(i, uplink_to_port(j)));
-      }
-    }
-
-    // debug:
-    cout << "Loading topology..." << endl;
-    int sz = 0;
-    while(!input.eof()) {
-      int s, d; // current source and destination tor
-      vector<int> vtemp;
-      int temp;
-      getline(input, line);
-      if (line.length() <= 0) continue;
-      stringstream stream(line);
-      while (stream >> temp){
-        vtemp.push_back(temp);
-      }
-      s = vtemp[0]; // current source
-      d = vtemp[1]; // current dest
-      sz = _lbls[s][d].size();
-      _lbls[s][d].resize(sz + 1);
-      //starting from the source, push each port on the path
-      int crt = s;
-      for (int i = 2; i < vtemp.size(); i++) {
-        //[crt_tor][nxt_tor]->port
-        int port = _adj_to_port[{crt, vtemp[i]}];
-        _lbls[s][d][sz].push_back(port);
-        //we moved to the next tor
-        crt = vtemp[i];
-      }
-    }
-
-    // debug:
-    cout << "Loaded topology." << endl;
-
-  } else {
-    cout << "Could not open topology file\n"; exit(1);
+  if (!input.is_open()) {
+    cout << "Could not open topology file " << topfile << endl;
+    exit(1);
   }
+
+  string line;
+  getline(input, line);
+  stringstream header(line);
+  if (!(header >> _ntor >> _ndl) || _ntor <= 0 || _ndl <= 0) {
+    cout << "Invalid graph topology header in " << topfile << endl;
+    exit(1);
+  }
+  _no_of_nodes = _ntor * _ndl;
+  _nslice = 1;
+  _nsuperslice = 1;
+  _slicetime.assign(4, 0);
+  failed_links = 0;
+
+  int node;
+  _adjacency.resize(_ntor);
+  for (int tor = 0; tor < _ntor; tor++) {
+    if (!getline(input, line)) {
+      cout << "Missing adjacency row for ToR " << tor << " in " << topfile << endl;
+      exit(1);
+    }
+    stringstream adjacency_stream(line);
+    while (adjacency_stream >> node) {
+      if (node < 0 || node >= _ntor || node == tor) {
+        cout << "Invalid neighbor " << node << " for ToR " << tor << endl;
+        exit(1);
+      }
+      if (_adj_to_port.count(make_pair(tor, node)) > 0) {
+        cout << "Duplicate neighbor " << node << " for ToR " << tor << endl;
+        exit(1);
+      }
+      int port = _ndl + _adjacency[tor].size();
+      _adjacency[tor].push_back(node);
+      _adj_to_port[make_pair(tor, node)] = port;
+    }
+    if (_adjacency[tor].empty()) {
+      cout << "ToR " << tor << " has no graph neighbors" << endl;
+      exit(1);
+    }
+    if (tor == 0) {
+      _nul = _adjacency[tor].size();
+    } else if (_adjacency[tor].size() != (size_t)_nul) {
+      cout << "GraphTopology requires a regular graph; ToR " << tor
+           << " has " << _adjacency[tor].size() << " neighbors, expected "
+           << _nul << endl;
+      exit(1);
+    }
+  }
+
+  _lbls.resize(_ntor);
+  _connected_slices.resize(_ntor);
+  for (int tor = 0; tor < _ntor; tor++) {
+    _lbls[tor].resize(_ntor);
+    _connected_slices[tor].resize(_ntor);
+    for (int uplink = 0; uplink < _nul; uplink++) {
+      int neighbor = _adjacency[tor][uplink];
+      _connected_slices[tor][neighbor].push_back(
+          make_pair(0, _ndl + uplink));
+    }
+  }
+
+  cout << "Loading topology..." << endl;
+  while (getline(input, line)) {
+    if (line.length() <= 0) continue;
+    vector<int> route;
+    int value;
+    stringstream route_stream(line);
+    while (route_stream >> value) route.push_back(value);
+    if (route.size() < 3) {
+      cout << "Invalid graph route (expected src dst next-hop...): " << line << endl;
+      exit(1);
+    }
+
+    int src = route[0];
+    int dst = route[1];
+    if (src < 0 || src >= _ntor || dst < 0 || dst >= _ntor || src == dst) {
+      cout << "Invalid graph route endpoints: " << line << endl;
+      exit(1);
+    }
+
+    int path_index = _lbls[src][dst].size();
+    _lbls[src][dst].resize(path_index + 1);
+    int current = src;
+    for (size_t hop = 2; hop < route.size(); hop++) {
+      int next = route[hop];
+      map<pair<int,int>, int>::const_iterator port_it =
+          _adj_to_port.find(make_pair(current, next));
+      if (port_it == _adj_to_port.end()) {
+        cout << "Route uses missing edge " << current << " -> " << next
+             << ": " << line << endl;
+        exit(1);
+      }
+      _lbls[src][dst][path_index].push_back(port_it->second);
+      current = next;
+    }
+    if (current != dst) {
+      cout << "Route does not end at destination " << dst << ": " << line << endl;
+      exit(1);
+    }
+  }
+  cout << "Loaded topology." << endl;
 }
 
 // set number of possible pipes and queues

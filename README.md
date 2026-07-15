@@ -72,6 +72,13 @@ The executables will be built in the `datacenter/` subdirectories.
 
 ## Running the simulations and reproducing the results
 
+### Small 8-ToR ring validation
+
+A lightweight fixed-topology Flare experiment is available for validating how
+1-, 2-, and 4-hop credit paths affect credit drop, egress pressure, goodput,
+packet loss, and queue occupancy. See
+[`run/ring_credit_distance/README.md`](run/ring_credit_distance/README.md).
+
 ### Fetching the missing files
 
 Traffic traces based on the Hadoop workload are above 100MB, so are provided separately to download [HERE](https://ncs-flare-project.mpi-inf.mpg.de/resources/hadoop_traces.tgz).

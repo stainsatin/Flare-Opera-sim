@@ -24,13 +24,14 @@ class CreditQueue : public Queue {
     void doNextEvent();
     void reportLoss();
     virtual void reportMaxqueuesize();
+    void reportCreditStats(const string& scope, int id, int port);
  protected:
     enum pkt_type {NONE, DATA, CRED};
     pkt_type _tx_next;
     int _next_prio;
     void updateAvailCredit();
     void scheduleCredit();
-    void handleCredit(Packet &pkt);
+    bool handleCredit(Packet &pkt);
     simtime_picosec cred_tx_delta();
     bool credit_ready();
     int credit_prio(Packet &pkt);
@@ -51,7 +52,13 @@ class CreditQueue : public Queue {
     bool _cred_tx_pending;
     vector<list<Packet*>> _enqueued_cred;
     uint64_t _tot_creds;
+    uint64_t _tx_creds;
     uint64_t _drop_creds;
+    uint64_t _drop_overflow;
+    uint64_t _drop_timeout;
+    uint64_t _drop_shaping;
+    uint64_t _drop_tentative;
+    mem_b _max_cred_queue;
     map<int, uint64_t> _hops_to_creds;
 };
 

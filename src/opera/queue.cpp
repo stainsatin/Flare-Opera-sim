@@ -80,7 +80,7 @@ void Queue::sendFromQueue(Packet* pkt) {
         nextpipe = top->get_pipe_serv_tor(pkt->get_src());
         nextpipe->receivePacket(*pkt);
     } else {
-        if (_port > 5) {
+        if (!top->is_last_hop(_port)) {
             int next_tor = top->get_nextToR(top->time_to_slice(eventlist().now()),
                     pkt->get_crtToR(), pkt->get_crtport());
             pkt->add_hop({_tor, next_tor});
