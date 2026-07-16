@@ -75,7 +75,7 @@ The executables will be built in the `datacenter/` subdirectories.
 ### Small 8-ToR ring validation
 
 A lightweight fixed-topology Flare experiment is available for validating how
-1-, 2-, and 4-hop credit paths affect credit drop, egress pressure, goodput,
+1-, 2-, and 3-hop credit paths affect credit drop, egress pressure, goodput,
 packet loss, and queue occupancy. See
 [`run/ring_credit_distance/README.md`](run/ring_credit_distance/README.md).
 

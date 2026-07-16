@@ -19,6 +19,8 @@ CREDIT_FIELDS = (
     "timeout",
     "shaping",
     "tentative",
+    "shaping_checks",
+    "shaping_admitted",
 )
 
 
@@ -54,7 +56,7 @@ def parse_log(path, distance, warmup_fraction):
             fields = line.split()
             if not fields:
                 continue
-            if fields[0] == "CreditStats" and len(fields) >= 13:
+            if fields[0] == "CreditStats" and len(fields) >= 15:
                 record = {
                     "distance": distance,
                     "scope": fields[1],
@@ -62,7 +64,7 @@ def parse_log(path, distance, warmup_fraction):
                     "port": int(fields[3]),
                 }
                 record.update(
-                    {name: int(value) for name, value in zip(CREDIT_FIELDS, fields[4:13])}
+                    {name: int(value) for name, value in zip(CREDIT_FIELDS, fields[4:15])}
                 )
                 record["drop_ratio"] = (
                     record["dropped"] / record["received"]
@@ -105,6 +107,8 @@ def parse_log(path, distance, warmup_fraction):
     delivered = sum(record["transmitted"] for record in downlink_stats)
     mean_util = mean_after_warmup(utilization, warmup_fraction)
     mean_input = mean_after_warmup(input_load, warmup_fraction)
+    shaping_checks = sum(record["shaping_checks"] for record in credit_stats)
+    shaping_admitted = sum(record["shaping_admitted"] for record in credit_stats)
 
     summary = {
         "distance": distance,
@@ -116,6 +120,11 @@ def parse_log(path, distance, warmup_fraction):
         "timeout_drops": sum(record["timeout"] for record in credit_stats),
         "shaping_drops": sum(record["shaping"] for record in credit_stats),
         "tentative_drops": sum(record["tentative"] for record in credit_stats),
+        "shaping_checks": shaping_checks,
+        "shaping_admitted": shaping_admitted,
+        "shaping_admission_ratio": (
+            shaping_admitted / shaping_checks if shaping_checks else ""
+        ),
         "tor_credit_arrivals": sum(record["received"] for record in tor_stats),
         "uplink_credit_arrivals": sum(record["received"] for record in uplink_stats),
         "uplink_arrivals_per_generated": (
@@ -156,7 +165,7 @@ def write_csv(path, rows, fieldnames):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("results", type=Path, help="directory containing k1.log, k2.log, k4.log")
+    parser.add_argument("results", type=Path, help="directory containing k1.log, k2.log, k3.log")
     parser.add_argument(
         "--warmup-fraction",
         type=float,
@@ -167,7 +176,7 @@ def main():
         "--distances",
         type=int,
         nargs="+",
-        choices=(1, 2, 4),
+        choices=(1, 2, 3),
         help="only analyze the selected distances",
     )
     args = parser.parse_args()
@@ -176,7 +185,7 @@ def main():
 
     summaries = []
     queue_rows = []
-    log_pattern = re.compile(r"^k([124])\.log$")
+    log_pattern = re.compile(r"^k([123])\.log$")
     for log_path in sorted(args.results.glob("k*.log")):
         match = log_pattern.match(log_path.name)
         if not match:
@@ -189,7 +198,7 @@ def main():
         queue_rows.extend(stats)
 
     if not summaries:
-        parser.error(f"no completed k1.log, k2.log, or k4.log found in {args.results}")
+        parser.error(f"no completed k1.log, k2.log, or k3.log found in {args.results}")
 
     summaries.sort(key=lambda row: row["distance"])
     summary_path = args.results / "summary.csv"
@@ -209,15 +218,15 @@ def main():
         ],
     )
 
-    print("k  credit_drop  drop_ratio  goodput_Gbps  uplink_arrivals/credit  max_credit_q")
+    print("k  drop_ratio  overflow  shaping  shape_check  shape_admit  goodput_Gbps")
     for row in summaries:
         goodput = row["mean_goodput_gbps"]
         goodput_text = f"{goodput:.3f}" if goodput != "" else "n/a"
         print(
-            f"{row['distance']:<2} {row['credit_drops']:<12} "
-            f"{row['credit_drop_ratio']:<11.6f} {goodput_text:<13} "
-            f"{row['uplink_arrivals_per_generated']:<23.3f} "
-            f"{row['max_uplink_credit_queue_packets']}"
+            f"{row['distance']:<2} {row['credit_drop_ratio']:<11.6f} "
+            f"{row['overflow_drops']:<9} {row['shaping_drops']:<8} "
+            f"{row['shaping_checks']:<12} {row['shaping_admitted']:<12} "
+            f"{goodput_text}"
         )
     print(f"Wrote {summary_path}")
     print(f"Wrote {queue_path}")

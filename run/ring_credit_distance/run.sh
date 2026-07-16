@@ -12,8 +12,9 @@ SHAPING_QUEUE=""
 DATA_QUEUE=256
 OUTPUT_DIR="${SCRIPT_DIR}/results"
 BUILD=yes
-DISTANCES=(1 2 4)
-PROBFILE=""
+DISTANCES=(1 2 3)
+PROBFILE="${ROOT_DIR}/run/pfun_exp2.txt"
+SHAPING_ENABLED=yes
 
 usage() {
     cat <<'EOF'
@@ -23,10 +24,11 @@ Options:
   --simtime SECONDS     Simulation duration (default: 0.02)
   --utiltime MS         Utilization sampling interval (default: 0.1)
   --credq PACKETS       Credit queue capacity (default: 16)
-  --qshaping PACKETS    Flare shaping threshold (default: same as --credq)
+  --qshaping PACKETS    Flare shaping threshold (default: half of --credq)
   --queue PACKETS       Data queue capacity (default: 256)
-  --distance K          Run only K=1, K=2, or K=4
-  --probfile FILE       Enable Flare shaping with a hop probability file
+  --distance K          Run only K=1, K=2, or K=3
+  --probfile FILE       Replace the default run/pfun_exp2.txt probability file
+  --no-shaping          Disable probabilistic admission shaping
   --output DIR          Result directory
   --build               Build even if the simulator binary exists
   --no-build            Never build; require an existing binary
@@ -42,10 +44,11 @@ while [[ $# -gt 0 ]]; do
         --qshaping) SHAPING_QUEUE="$2"; shift 2 ;;
         --queue) DATA_QUEUE="$2"; shift 2 ;;
         --distance)
-            case "$2" in 1|2|4) DISTANCES=("$2") ;; *) echo "--distance must be 1, 2, or 4" >&2; exit 2 ;; esac
+            case "$2" in 1|2|3) DISTANCES=("$2") ;; *) echo "--distance must be 1, 2, or 3" >&2; exit 2 ;; esac
             shift 2
             ;;
-        --probfile) PROBFILE="$2"; shift 2 ;;
+        --probfile) PROBFILE="$2"; SHAPING_ENABLED=yes; shift 2 ;;
+        --no-shaping) SHAPING_ENABLED=no; shift ;;
         --output) OUTPUT_DIR="$2"; shift 2 ;;
         --build) BUILD=yes; shift ;;
         --no-build) BUILD=no; shift ;;
@@ -64,12 +67,20 @@ elif [[ ! -x "${SIMULATOR}" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-if [[ -z "${SHAPING_QUEUE}" ]]; then
+if [[ "${SHAPING_ENABLED}" == no ]]; then
     SHAPING_QUEUE="${CREDIT_QUEUE}"
-fi
-PROB_ARGS=()
-if [[ -n "${PROBFILE}" ]]; then
+    PROB_ARGS=()
+    echo "Credit shaping: disabled (overflow-only control)"
+else
+    if [[ -z "${SHAPING_QUEUE}" ]]; then
+        SHAPING_QUEUE=$(( (CREDIT_QUEUE + 1) / 2 ))
+    fi
+    if [[ ! -f "${PROBFILE}" ]]; then
+        echo "Probability file not found: ${PROBFILE}" >&2
+        exit 1
+    fi
     PROB_ARGS=(-probfile "${PROBFILE}")
+    echo "Credit shaping: enabled, credq=${CREDIT_QUEUE}, qshaping=${SHAPING_QUEUE}, probfile=${PROBFILE}"
 fi
 for distance in "${DISTANCES[@]}"; do
     stdout_log="${OUTPUT_DIR}/k${distance}.log"

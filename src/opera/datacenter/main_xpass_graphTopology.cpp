@@ -55,7 +55,8 @@ map<int,double> read_probfun(const string& fname) {
 
 void report_credit_stats(GraphTopology* top) {
     cout << "# CreditStats scope id port received transmitted queued max_queued "
-         << "dropped overflow timeout shaping tentative" << endl;
+         << "dropped overflow timeout shaping tentative shaping_checks "
+         << "shaping_admitted" << endl;
     cout << "# DataQueueStats scope id port dropped" << endl;
     for (int host = 0; host < top->no_of_nodes(); host++) {
         CreditQueue* queue = dynamic_cast<CreditQueue*>(top->get_queue_serv_tor(host));

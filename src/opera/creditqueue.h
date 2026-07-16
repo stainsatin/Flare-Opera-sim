@@ -58,6 +58,8 @@ class CreditQueue : public Queue {
     uint64_t _drop_timeout;
     uint64_t _drop_shaping;
     uint64_t _drop_tentative;
+    uint64_t _shaping_checks;
+    uint64_t _shaping_admitted;
     mem_b _max_cred_queue;
     map<int, uint64_t> _hops_to_creds;
 };

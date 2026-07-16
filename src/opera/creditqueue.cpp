@@ -58,6 +58,8 @@ CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _drop_timeout = 0;
   _drop_shaping = 0;
   _drop_tentative = 0;
+  _shaping_checks = 0;
+  _shaping_admitted = 0;
   _max_cred_queue = 0;
   _next_sched_tx = NO_PENDING_TX;
   _tx_next = NONE;
@@ -192,6 +194,7 @@ bool CreditQueue::handleCredit(Packet &pkt) {
   }
   if(((XPassPull*)&pkt)->get_xpsrc()->_is_flare) {
       if (queuesize_cred(prio) > _shaping_thresh) {
+          _shaping_checks++;
           int remaining_hops = pkt.get_tidalhop();
           //more hops, less chance
           double remaining_hops_chance = _top->get_prob_hops(remaining_hops);
@@ -213,6 +216,7 @@ bool CreditQueue::handleCredit(Packet &pkt) {
               _drop_shaping++;
               return false;
           }
+          _shaping_admitted++;
       }
   }
   // credit timeout is set to expected max queueing delay if queue was FIFO
@@ -388,7 +392,8 @@ void CreditQueue::reportCreditStats(const string& scope, int id, int port) {
        << _tot_creds << " " << _tx_creds << " " << queuesize_cred() / 64
        << " " << _max_cred_queue / 64 << " " << _drop_creds << " "
        << _drop_overflow << " " << _drop_timeout << " " << _drop_shaping
-       << " " << _drop_tentative << endl;
+       << " " << _drop_tentative << " " << _shaping_checks << " "
+       << _shaping_admitted << endl;
 }
 
 void CreditQueue::reportMaxqueuesize() {
