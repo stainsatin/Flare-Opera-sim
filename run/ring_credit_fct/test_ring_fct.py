@@ -61,7 +61,7 @@ class RingFctExperimentTest(unittest.TestCase):
             )
 
             summary, queues, flows = ANALYZER.analyze_case(
-                log_path, trace_path, distance=2
+                log_path, trace_path, distance=2, simtime_s=0.001
             )
             self.assertEqual(len(queues), 3)
             self.assertEqual(len(flows), 2)
@@ -70,7 +70,10 @@ class RingFctExperimentTest(unittest.TestCase):
             self.assertEqual(summary["incomplete_flows"], 0)
             self.assertEqual(summary["completion_ratio"], 1.0)
             self.assertAlmostEqual(summary["offered_load_gbps"], 80.0)
-            self.assertAlmostEqual(summary["workload_throughput_gbps"], 40.0)
+            self.assertAlmostEqual(summary["simulation_throughput_gbps"], 16.0)
+            self.assertAlmostEqual(
+                summary["active_makespan_throughput_gbps"], 40.0
+            )
             self.assertAlmostEqual(summary["mean_fct_ms"], 0.25)
             self.assertAlmostEqual(summary["median_fct_ms"], 0.2)
             self.assertAlmostEqual(summary["p95_fct_ms"], 0.3)
@@ -88,6 +91,7 @@ class RingFctExperimentTest(unittest.TestCase):
         self.assertIn("INTERVAL_NS=100000", script)
         self.assertIn("DISTANCES=(1 2 3)", script)
         self.assertIn('python3 "${SCRIPT_DIR}/analyze.py"', script)
+        self.assertIn('--simtime "${SIMTIME}"', script)
 
 
 if __name__ == "__main__":

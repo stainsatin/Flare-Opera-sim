@@ -13,6 +13,26 @@
 #include "network.h"
 #include "loggertypes.h"
 
+struct FlowCreditCounters {
+    uint32_t sender = 0;
+    uint32_t receiver = 0;
+    uint32_t path_hops = 0;
+    uint64_t generated = 0;
+    uint64_t delivered = 0;
+    uint64_t queue_arrivals = 0;
+    uint64_t queue_transmissions = 0;
+    uint64_t dropped = 0;
+    uint64_t overflow = 0;
+    uint64_t timeout = 0;
+    uint64_t shaping = 0;
+    uint64_t tentative = 0;
+    uint64_t shaping_checks = 0;
+    uint64_t shaping_admitted = 0;
+    uint64_t waste_hops = 0;
+};
+
+void reportFlowCreditStats();
+
 class CreditQueue : public Queue {
  public:
     CreditQueue(linkspeed_bps bitrate, mem_b maxsize, EventList &eventlist, 
@@ -62,6 +82,7 @@ class CreditQueue : public Queue {
     uint64_t _shaping_admitted;
     mem_b _max_cred_queue;
     map<int, uint64_t> _hops_to_creds;
+    bool _is_nic;
 };
 
 class NICCreditQueue : public CreditQueue {

@@ -68,12 +68,13 @@ void report_credit_stats(GraphTopology* top) {
     for (int tor = 0; tor < top->no_of_tors(); tor++) {
         for (int port = 0; port < top->no_of_hpr() + top->no_of_uplinks(); port++) {
             CreditQueue* queue = dynamic_cast<CreditQueue*>(top->get_queue_tor(tor, port));
-            assert(queue);
+            if (!queue) continue;
             queue->reportCreditStats("tor", tor, port);
             cout << "DataQueueStats tor " << tor << " " << port << " "
                  << queue->num_drops() << endl;
         }
     }
+    reportFlowCreditStats();
 }
 
 EventList eventlist;

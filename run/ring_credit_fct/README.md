@@ -57,11 +57,12 @@ The default output directory is `run/ring_credit_fct/results/`:
   workloads used by the run.
 - `k1.log`, `k2.log`, `k3.log`: simulator stdout including `FCT` records.
 
-`workload_throughput_gbps` is completed bytes divided by the interval from the
-first flow start to the last observed completion. It is the primary throughput
-metric for this finite workload. `sim_sampled_goodput_gbps` averages utilization
-over the full simulation and therefore includes the idle tail after all flows
-finish.
+`simulation_throughput_gbps` is completed bytes divided by the full configured
+simulation time, including idle intervals. `active_makespan_throughput_gbps`
+uses the interval from the first flow start to the last observed completion and
+shows how quickly the workload drains. `sim_sampled_goodput_gbps` is the
+utilization-monitor estimate over the full simulation and is retained as a
+cross-check of the byte-based simulation throughput.
 
 FCT is measured from each scheduled flow start until cumulative acknowledgement
 of its final data packet. Credit drops do not directly mark a flow failed; they

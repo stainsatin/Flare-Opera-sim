@@ -5,34 +5,37 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 ROOT_DIR=$(cd "${SCRIPT_DIR}/../.." && pwd -P)
 SIMULATOR="${ROOT_DIR}/src/opera/datacenter/htsim_xpass_graphTopology"
 
-SIMTIME=0.02
-UTILTIME=0.05
+SIMTIME=0.25
+UTILTIME=0.5
 FLOW_SIZE=1000000
 ROUNDS=20
-INTERVAL_NS=100000
+INTERVAL_NS=10000000
+ORDER_GAP_NS=1000
 CREDIT_QUEUE=16
 SHAPING_QUEUE=""
 DATA_QUEUE=256
 OUTPUT_DIR="${SCRIPT_DIR}/results"
 BUILD=yes
-DISTANCES=(1 2 3)
+CASES=(short_first long_first simultaneous)
 PROBFILE="${ROOT_DIR}/run/pfun_exp2.txt"
+TOPOLOGY="${ROOT_DIR}/topologies/multibottleneck_13tor_graph.txt"
 SHAPING_ENABLED=yes
 
 usage() {
     cat <<'EOF'
-Usage: bash run/ring_credit_fct/run.sh [options]
+Usage: bash run/multibottleneck_credit_order/run.sh [options]
 
 Options:
-  --simtime SECONDS     Simulation duration (default: 0.02)
-  --utiltime MS         Utilization sampling interval (default: 0.05)
+  --simtime SECONDS     Simulation duration (default: 0.25)
+  --utiltime MS         Utilization sampling interval (default: 0.5)
   --flow-size BYTES     Bytes per finite flow (default: 1000000)
   --rounds COUNT        Eight-flow arrival waves (default: 20)
-  --interval-ns NS      Time between waves (default: 100000)
+  --interval-ns NS      Time between waves (default: 10000000)
+  --order-gap-ns NS     Short/long start-time gap (default: 1000)
+  --case NAME           Run one of short_first, long_first, simultaneous
   --credq PACKETS       Credit queue capacity (default: 16)
   --qshaping PACKETS    Flare shaping threshold (default: half of --credq)
   --queue PACKETS       Data queue capacity (default: 256)
-  --distance K          Run only K=1, K=2, or K=3
   --probfile FILE       Replace the default run/pfun_exp2.txt probability file
   --no-shaping          Disable probabilistic admission shaping
   --output DIR          Result directory
@@ -49,13 +52,17 @@ while [[ $# -gt 0 ]]; do
         --flow-size) FLOW_SIZE="$2"; shift 2 ;;
         --rounds) ROUNDS="$2"; shift 2 ;;
         --interval-ns) INTERVAL_NS="$2"; shift 2 ;;
+        --order-gap-ns) ORDER_GAP_NS="$2"; shift 2 ;;
+        --case)
+            case "$2" in
+                short_first|long_first|simultaneous) CASES=("$2") ;;
+                *) echo "invalid --case: $2" >&2; exit 2 ;;
+            esac
+            shift 2
+            ;;
         --credq) CREDIT_QUEUE="$2"; shift 2 ;;
         --qshaping) SHAPING_QUEUE="$2"; shift 2 ;;
         --queue) DATA_QUEUE="$2"; shift 2 ;;
-        --distance)
-            case "$2" in 1|2|3) DISTANCES=("$2") ;; *) echo "--distance must be 1, 2, or 3" >&2; exit 2 ;; esac
-            shift 2
-            ;;
         --probfile) PROBFILE="$2"; SHAPING_ENABLED=yes; shift 2 ;;
         --no-shaping) SHAPING_ENABLED=no; shift ;;
         --output) OUTPUT_DIR="$2"; shift 2 ;;
@@ -92,17 +99,18 @@ else
     echo "Credit shaping: enabled, credq=${CREDIT_QUEUE}, qshaping=${SHAPING_QUEUE}, probfile=${PROBFILE}"
 fi
 
-for distance in "${DISTANCES[@]}"; do
-    flowfile="${OUTPUT_DIR}/traffic/k${distance}.htsim"
-    stdout_log="${OUTPUT_DIR}/k${distance}.log"
-    htsim_log="${OUTPUT_DIR}/k${distance}.htsim"
+for case_name in "${CASES[@]}"; do
+    flowfile="${OUTPUT_DIR}/traffic/${case_name}.htsim"
+    stdout_log="${OUTPUT_DIR}/${case_name}.log"
+    htsim_log="${OUTPUT_DIR}/${case_name}.htsim"
     python3 "${SCRIPT_DIR}/generate_flows.py" \
-        --distance "${distance}" \
+        --case "${case_name}" \
         --flow-size "${FLOW_SIZE}" \
         --rounds "${ROUNDS}" \
         --interval-ns "${INTERVAL_NS}" \
+        --order-gap-ns "${ORDER_GAP_NS}" \
         --output "${flowfile}"
-    echo "Running ring FCT distance k=${distance} for ${SIMTIME}s..."
+    echo "Running multi-bottleneck case=${case_name} for ${SIMTIME}s..."
     "${SIMULATOR}" \
         -flare \
         -strat single \
@@ -118,11 +126,11 @@ for distance in "${DISTANCES[@]}"; do
         -tloss 0.1 \
         -fbw 1.2 \
         "${PROB_ARGS[@]}" \
-        -topfile "${ROOT_DIR}/topologies/ring_8tor_graph.txt" \
+        -topfile "${TOPOLOGY}" \
         -flowfile "${flowfile}" \
         -o "${htsim_log}" \
         > "${stdout_log}" 2>&1
 done
 
 python3 "${SCRIPT_DIR}/analyze.py" "${OUTPUT_DIR}" \
-    --simtime "${SIMTIME}" --distances "${DISTANCES[@]}"
+    --simtime "${SIMTIME}" --cases "${CASES[@]}"

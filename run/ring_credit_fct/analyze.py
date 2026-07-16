@@ -95,7 +95,7 @@ def infer_offered_load_gbps(trace):
     return total_bytes * 8.0 / (arrival_window_ms * 1_000_000.0)
 
 
-def analyze_case(log_path, trace_path, distance):
+def analyze_case(log_path, trace_path, distance, simtime_s):
     base_summary, queues = BASE.parse_log(log_path, distance, warmup_fraction=0.0)
     trace = parse_trace(trace_path)
     flows, unfinished_markers = parse_fct_records(log_path, distance)
@@ -121,7 +121,13 @@ def analyze_case(log_path, trace_path, distance):
         "offered_bytes": sum(row["bytes"] for row in trace),
         "completed_bytes": completed_bytes,
         "offered_load_gbps": infer_offered_load_gbps(trace),
-        "workload_throughput_gbps": (
+        "simulation_time_s": simtime_s,
+        "simulation_throughput_gbps": (
+            completed_bytes * 8.0 / (simtime_s * 1_000_000_000.0)
+            if simtime_s > 0
+            else ""
+        ),
+        "active_makespan_throughput_gbps": (
             completed_bytes * 8.0 / (makespan_ms * 1_000_000.0)
             if makespan_ms > 0
             else ""
@@ -175,7 +181,12 @@ def main():
     parser.add_argument(
         "--distances", type=int, nargs="+", choices=(1, 2, 3), default=(1, 2, 3)
     )
+    parser.add_argument(
+        "--simtime", type=float, required=True, help="simulation duration in seconds"
+    )
     args = parser.parse_args()
+    if args.simtime <= 0:
+        parser.error("--simtime must be positive")
 
     summaries = []
     queue_rows = []
@@ -187,7 +198,9 @@ def main():
             parser.error(f"missing simulator log: {log_path}")
         if not trace_path.is_file():
             parser.error(f"missing traffic trace: {trace_path}")
-        summary, queues, flows = analyze_case(log_path, trace_path, distance)
+        summary, queues, flows = analyze_case(
+            log_path, trace_path, distance, args.simtime
+        )
         summaries.append(summary)
         queue_rows.extend(queues)
         flow_rows.extend(flows)
@@ -228,7 +241,7 @@ def main():
 
     print(
         "k  done       drop_ratio  overflow  shaping  "
-        "throughput_Gbps  mean_FCT_ms  p99_FCT_ms"
+        "throughput_Gbps  active_Gbps  mean_FCT_ms  p99_FCT_ms"
     )
     for row in summaries:
         print(
@@ -237,7 +250,8 @@ def main():
             f"{row['credit_drop_ratio']:<11.6f} "
             f"{row['overflow_drops']:<9} "
             f"{row['shaping_drops']:<8} "
-            f"{format_metric(row['workload_throughput_gbps']):<16} "
+            f"{format_metric(row['simulation_throughput_gbps']):<16} "
+            f"{format_metric(row['active_makespan_throughput_gbps']):<12} "
             f"{format_metric(row['mean_fct_ms']):<12} "
             f"{format_metric(row['p99_fct_ms'])}"
         )

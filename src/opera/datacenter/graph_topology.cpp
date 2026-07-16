@@ -1,5 +1,6 @@
 // -*- c-basic-offset: 4; tab-width: 8; indent-tabs-mode: t -*-
 #include "graph_topology.h"
+#include <algorithm>
 #include <vector>
 #include "dynexp_topology.h"
 #include "string.h"
@@ -68,6 +69,7 @@ void GraphTopology::read_params(string topfile) {
   failed_links = 0;
 
   int node;
+  _nul = 0;
   _adjacency.resize(_ntor);
   for (int tor = 0; tor < _ntor; tor++) {
     if (!getline(input, line)) {
@@ -92,14 +94,7 @@ void GraphTopology::read_params(string topfile) {
       cout << "ToR " << tor << " has no graph neighbors" << endl;
       exit(1);
     }
-    if (tor == 0) {
-      _nul = _adjacency[tor].size();
-    } else if (_adjacency[tor].size() != (size_t)_nul) {
-      cout << "GraphTopology requires a regular graph; ToR " << tor
-           << " has " << _adjacency[tor].size() << " neighbors, expected "
-           << _nul << endl;
-      exit(1);
-    }
+    _nul = max(_nul, (int)_adjacency[tor].size());
   }
 
   _lbls.resize(_ntor);
@@ -107,7 +102,7 @@ void GraphTopology::read_params(string topfile) {
   for (int tor = 0; tor < _ntor; tor++) {
     _lbls[tor].resize(_ntor);
     _connected_slices[tor].resize(_ntor);
-    for (int uplink = 0; uplink < _nul; uplink++) {
+    for (int uplink = 0; uplink < (int)_adjacency[tor].size(); uplink++) {
       int neighbor = _adjacency[tor][uplink];
       _connected_slices[tor][neighbor].push_back(
           make_pair(0, _ndl + uplink));

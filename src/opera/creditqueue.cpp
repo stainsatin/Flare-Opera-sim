@@ -11,6 +11,7 @@
 #include <cmath>
 #include <iostream>
 #include <math.h>
+#include <map>
 
 
 static bool debug_flow(uint64_t flow_id) {
@@ -26,6 +27,23 @@ static bool debug_flow(uint64_t flow_id) {
   return false;
 }
 static bool debug_q(int tor, int port) { return false; }
+
+static map<uint32_t, FlowCreditCounters> flow_credit_counters;
+
+static FlowCreditCounters& flowCreditCounters(Packet& pkt) {
+  FlowCreditCounters& counters = flow_credit_counters[pkt.flow_id()];
+  counters.sender = pkt.get_dst();
+  counters.receiver = pkt.get_src();
+  counters.path_hops = max(pkt.get_maxhops(), 0);
+  return counters;
+}
+
+static void recordFlowCreditDrop(Packet& pkt, uint64_t FlowCreditCounters::*reason) {
+  FlowCreditCounters& counters = flowCreditCounters(pkt);
+  counters.dropped++;
+  counters.*reason += 1;
+  counters.waste_hops += max(pkt.get_crthop(), 0);
+}
 
 #define NO_PENDING_TX (simtime_picosec)(-1); // unsigned so max unit
 
@@ -67,6 +85,7 @@ CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _data_size = 1575;
   _cred_timeout = 100 * _data_size * _ps_per_byte;
   _next_prio = -1;
+  _is_nic = false;
 }
 
 simtime_picosec CreditQueue::cred_tx_delta() {
@@ -136,6 +155,7 @@ inline int CreditQueue::next_cred() {
         _hops_to_creds[max((p->get_maxhops() - p->get_crthop()), 1)] -= 1;
         _drop_creds++;
         _drop_timeout++;
+        recordFlowCreditDrop(*p, &FlowCreditCounters::timeout);
         p->free();
         _enqueued_cred[i].pop_back();
       }
@@ -189,12 +209,14 @@ bool CreditQueue::handleCredit(Packet &pkt) {
     // cout << nodename() << " TENTATIVE DROPPED for " << pkt.flow_id() << endl;
     _drop_creds++;
     _drop_tentative++;
+    recordFlowCreditDrop(pkt, &FlowCreditCounters::tentative);
     pkt.free();
     return false;
   }
   if(((XPassPull*)&pkt)->get_xpsrc()->_is_flare) {
       if (queuesize_cred(prio) > _shaping_thresh) {
           _shaping_checks++;
+          flowCreditCounters(pkt).shaping_checks++;
           int remaining_hops = pkt.get_tidalhop();
           //more hops, less chance
           double remaining_hops_chance = _top->get_prob_hops(remaining_hops);
@@ -211,12 +233,14 @@ bool CreditQueue::handleCredit(Packet &pkt) {
           if (res < drop_chance) {
               //cout << nodename() << " CREDIT DROPPED (chance) for " << pkt.flow_id() << endl; cout << "dropping packet with " << remaining_hops << " remaining hops\n";
               __global_network_tot_cred_waste += pkt.get_crthop();
+              recordFlowCreditDrop(pkt, &FlowCreditCounters::shaping);
               pkt.free();
               _drop_creds++;
               _drop_shaping++;
               return false;
           }
           _shaping_admitted++;
+          flowCreditCounters(pkt).shaping_admitted++;
       }
   }
   // credit timeout is set to expected max queueing delay if queue was FIFO
@@ -242,12 +266,16 @@ void CreditQueue::receivePacket(Packet &pkt) {
   if (pkt.type() == XPCREDIT) {
     int prio = credit_prio(pkt);
     _tot_creds++;
+    FlowCreditCounters& counters = flowCreditCounters(pkt);
+    counters.queue_arrivals++;
+    if (_is_nic) counters.generated++;
     // cout << "xpcredit\n";
     if (queuesize_cred(prio) + pkt.size() > _maxsize_cred) {
       // if the credit doesn't fit in the queue, drop it
       // cout << nodename() << " CREDIT DROPPED (overflow) for " <<
       // pkt.flow_id() << endl;
       __global_network_tot_cred_waste += pkt.get_crthop();
+      recordFlowCreditDrop(pkt, &FlowCreditCounters::overflow);
       pkt.free();
       _drop_creds++;
       _drop_overflow++;
@@ -349,6 +377,9 @@ void CreditQueue::completeService() {
     updatePktOut(pkt->flow_id());
     _queuesize_cred[prio] -= pkt->size();
     _tx_creds++;
+    FlowCreditCounters& counters = flowCreditCounters(*pkt);
+    counters.queue_transmissions++;
+    if (!_is_nic && _port < _top->no_of_hpr()) counters.delivered++;
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
     assert(_hops_to_creds[pkt->get_tidalhop()] >= 0);
     _last_cred_tx_t = eventlist().now();
@@ -396,6 +427,26 @@ void CreditQueue::reportCreditStats(const string& scope, int id, int port) {
        << _shaping_admitted << endl;
 }
 
+void reportFlowCreditStats() {
+  cout << "# FlowCreditStats flow_id sender receiver path_hops generated "
+       << "delivered queue_arrivals queue_transmissions dropped overflow "
+       << "timeout shaping tentative shaping_checks shaping_admitted waste_hops"
+       << endl;
+  for (map<uint32_t, FlowCreditCounters>::const_iterator it =
+           flow_credit_counters.begin();
+       it != flow_credit_counters.end(); ++it) {
+    const FlowCreditCounters& counters = it->second;
+    cout << "FlowCreditStats " << it->first << " " << counters.sender << " "
+         << counters.receiver << " " << counters.path_hops << " "
+         << counters.generated << " " << counters.delivered << " "
+         << counters.queue_arrivals << " " << counters.queue_transmissions
+         << " " << counters.dropped << " " << counters.overflow << " "
+         << counters.timeout << " " << counters.shaping << " "
+         << counters.tentative << " " << counters.shaping_checks << " "
+         << counters.shaping_admitted << " " << counters.waste_hops << endl;
+  }
+}
+
 void CreditQueue::reportMaxqueuesize() {
   simtime_picosec crt_t = eventlist().now();
   cout << "Queue " << _tor << " " << _port << " " << _max_recorded_size << " " << queuesize() << " " << _queuesize_cred[0]/64.0 << " ";
@@ -421,7 +472,9 @@ NICCreditQueue::NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize,
                                DynExpTopology *top, mem_b credsize,
                                mem_b shaping_thresh, mem_b aeolus_thresh, mem_b tent_thresh)
     : CreditQueue(bitrate, maxsize, eventlist, logger, 0, 0, top, credsize,
-                  shaping_thresh, aeolus_thresh, tent_thresh) {}
+                  shaping_thresh, aeolus_thresh, tent_thresh) {
+  _is_nic = true;
+}
 
 void NICCreditQueue::completeService() {
   // cout << nodename() << " completeService " << eventlist().now() << endl;
@@ -437,6 +490,7 @@ void NICCreditQueue::completeService() {
     updatePktOut(pkt->flow_id());
     _queuesize_cred[prio] -= pkt->size();
     _tx_creds++;
+    flowCreditCounters(*pkt).queue_transmissions++;
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
     _last_cred_tx_t = eventlist().now();
     updatePktOut(pkt->flow_id());
