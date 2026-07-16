@@ -84,6 +84,18 @@ class RingExperimentTest(unittest.TestCase):
                 self.assertGreater(flow_size, 0)
                 self.assertEqual(start_ns, 0)
 
+    def test_credit_shaping_counts_only_tor_to_tor_hops(self):
+        pipe_source = (ROOT / "src/opera/pipe.cpp").read_text()
+        self.assertIn(
+            "const bool traversed_tor_link = pkt->get_crtToR() >= 0;",
+            pipe_source,
+        )
+        self.assertIn("if (traversed_tor_link)", pipe_source)
+
+        credit_queue_source = (ROOT / "src/opera/creditqueue.cpp").read_text()
+        self.assertIn("if (res < drop_chance)", credit_queue_source)
+        self.assertNotIn("if (res <= drop_chance)", credit_queue_source)
+
     def test_analyzer_aggregates_credit_and_performance_metrics(self):
         log = MemoryLog(
             "\n".join(

@@ -83,7 +83,9 @@ to half the credit queue: with the default 16-packet queue, shaping starts above
 hop-dependent admission probability. Its probabilities for 1, 2, and 3
 remaining hops are 1.0, 0.5, and 0.25. `shaping_checks` counts credits evaluated
 after crossing the threshold; `shaping_admitted` and `shaping` report the two
-outcomes. `--no-shaping` restores the overflow-only control configuration.
+outcomes. Hop counts include only ToR-to-ToR links: the first ToR egress sees
+`k` remaining hops, so the expected sequences are `1`, `2 -> 1`, and
+`3 -> 2 -> 1`. `--no-shaping` restores the overflow-only control configuration.
 
 To re-run analysis after copying or editing logs:
 

@@ -188,6 +188,7 @@ void Pipe::sendFromPipe(Packet *pkt) {
     } else {
         // we'll be delivering to a ToR queue
         DynExpTopology* top = pkt->get_topology();
+        const bool traversed_tor_link = pkt->get_crtToR() >= 0;
         switch(pkt->type()) {
             case TCP:
             case NDP:
@@ -314,7 +315,11 @@ void Pipe::sendFromPipe(Packet *pkt) {
             }
         }
         pkt->inc_crthop(); // increment the hop
-        pkt->set_tidalhop(max(pkt->get_tidalhop()-1, 1)); //reduce tidal hop count
+        // Tidal hops count ToR-to-ToR links. The access pipe only moves a
+        // packet from its host NIC into the source ToR.
+        if (traversed_tor_link) {
+            pkt->set_tidalhop(max(pkt->get_tidalhop()-1, 1));
+        }
 
         // get the port:
         if (pkt->get_crthop() == pkt->get_maxhops()) { // no more hops defined, need to set downlink port

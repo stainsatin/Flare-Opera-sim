@@ -208,7 +208,7 @@ bool CreditQueue::handleCredit(Packet &pkt) {
           // endl;
           assert(drop_chance >= 0);
           double res = drand();
-          if (res <= drop_chance) {
+          if (res < drop_chance) {
               //cout << nodename() << " CREDIT DROPPED (chance) for " << pkt.flow_id() << endl; cout << "dropping packet with " << remaining_hops << " remaining hops\n";
               __global_network_tot_cred_waste += pkt.get_crthop();
               pkt.free();
