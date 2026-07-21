@@ -40,12 +40,16 @@ FLOW_CLASSES = {
     (3, 12): ("short", 1),
     (4, 12): ("long", 4),
     (2, 10): ("short", 2),
-    (9, 10): ("long", 4),
-    (9, 11): ("short", 1),
-    (7, 11): ("long", 3),
+    (12, 10): ("long", 4),
+    (7, 0): ("short", 1),
+    (4, 0): ("long", 3),
+    (7, 1): ("short", 1),
+    (5, 1): ("long", 4),
     (6, 2): ("short", 1),
-    (11, 2): ("long", 5),
+    (1, 2): ("long", 3),
 }
+FLOWS_PER_ROUND = len(FLOW_CLASSES)
+RECEIVERS = tuple(sorted({receiver for _, receiver in FLOW_CLASSES}))
 
 
 def percentile(values, probability):
@@ -85,7 +89,7 @@ def parse_trace(path):
                     "path_hops": path_hops,
                     "bytes": flow_size,
                     "start_ns": start_ns,
-                    "round": len(rows) // 8,
+                    "round": len(rows) // FLOWS_PER_ROUND,
                 }
             )
     if not rows:
@@ -340,7 +344,7 @@ def main():
                     topology_losses if flow_class == "all" else "",
                 )
             )
-        for receiver in (12, 10, 11, 2):
+        for receiver in RECEIVERS:
             receiver_flows = [row for row in flow_rows if row["receiver"] == receiver]
             for flow_class in ("short", "long"):
                 row = summarize(receiver_flows, case, flow_class, args.simtime)

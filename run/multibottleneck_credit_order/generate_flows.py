@@ -12,15 +12,19 @@ FLOW_PAIRS = (
     ),
     (
         {"receiver": 10, "sender": 2, "flow_class": "short", "path_hops": 2},
-        {"receiver": 10, "sender": 9, "flow_class": "long", "path_hops": 4},
+        {"receiver": 10, "sender": 12, "flow_class": "long", "path_hops": 4},
     ),
     (
-        {"receiver": 11, "sender": 9, "flow_class": "short", "path_hops": 1},
-        {"receiver": 11, "sender": 7, "flow_class": "long", "path_hops": 3},
+        {"receiver": 0, "sender": 7, "flow_class": "short", "path_hops": 1},
+        {"receiver": 0, "sender": 4, "flow_class": "long", "path_hops": 3},
+    ),
+    (
+        {"receiver": 1, "sender": 7, "flow_class": "short", "path_hops": 1},
+        {"receiver": 1, "sender": 5, "flow_class": "long", "path_hops": 4},
     ),
     (
         {"receiver": 2, "sender": 6, "flow_class": "short", "path_hops": 1},
-        {"receiver": 2, "sender": 11, "flow_class": "long", "path_hops": 5},
+        {"receiver": 2, "sender": 1, "flow_class": "long", "path_hops": 3},
     ),
 )
 

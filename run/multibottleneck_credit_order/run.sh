@@ -29,7 +29,7 @@ Options:
   --simtime SECONDS     Simulation duration (default: 0.25)
   --utiltime MS         Utilization sampling interval (default: 0.5)
   --flow-size BYTES     Bytes per finite flow (default: 1000000)
-  --rounds COUNT        Eight-flow arrival waves (default: 20)
+  --rounds COUNT        Ten-flow arrival waves (default: 20)
   --interval-ns NS      Time between waves (default: 10000000)
   --order-gap-ns NS     Short/long start-time gap (default: 1000)
   --case NAME           Run one of short_first, long_first, simultaneous

@@ -45,11 +45,13 @@ class MultiBottleneckExperimentTest(unittest.TestCase):
             (12, 3): [3],
             (12, 4): [3, 7, 8, 4],
             (10, 2): [6, 2],
-            (10, 9): [6, 7, 8, 9],
-            (11, 9): [9],
-            (11, 7): [9, 8, 7],
+            (10, 12): [6, 7, 3, 12],
+            (0, 7): [7],
+            (0, 4): [7, 8, 4],
+            (1, 7): [7],
+            (1, 5): [7, 8, 9, 5],
             (2, 6): [6],
-            (2, 11): [6, 7, 8, 9, 11],
+            (2, 1): [6, 7, 1],
         }
         for endpoints, path in expected_credit_paths.items():
             self.assertEqual(routes[endpoints], path)
@@ -61,12 +63,12 @@ class MultiBottleneckExperimentTest(unittest.TestCase):
         short_first = GENERATOR.generate_rows(
             "short_first", 1_000_000, 2, 10_000_000, 1_000
         )
-        self.assertEqual(len(short_first), 16)
+        self.assertEqual(len(short_first), 20)
         self.assertEqual(short_first[0]["flow_class"], "short")
         self.assertEqual(short_first[0]["start_ns"], 0)
         self.assertEqual(short_first[1]["flow_class"], "long")
         self.assertEqual(short_first[1]["start_ns"], 1_000)
-        self.assertEqual(short_first[8]["start_ns"], 10_000_000)
+        self.assertEqual(short_first[10]["start_ns"], 10_000_000)
 
         long_first = GENERATOR.generate_rows(
             "long_first", 1_000_000, 1, 10_000_000, 1_000
@@ -79,9 +81,9 @@ class MultiBottleneckExperimentTest(unittest.TestCase):
         simultaneous = GENERATOR.generate_rows(
             "simultaneous", 1_000_000, 2, 10_000_000, 1_000
         )
-        self.assertEqual({row["start_ns"] for row in simultaneous[:8]}, {0})
+        self.assertEqual({row["start_ns"] for row in simultaneous[:10]}, {0})
         self.assertEqual(simultaneous[0]["flow_class"], "short")
-        self.assertEqual(simultaneous[8]["flow_class"], "long")
+        self.assertEqual(simultaneous[10]["flow_class"], "long")
 
     def test_analyzer_combines_fct_and_per_flow_credit_waste(self):
         with tempfile.TemporaryDirectory() as temp_dir:

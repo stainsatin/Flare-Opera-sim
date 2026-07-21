@@ -13,17 +13,17 @@ receiver 12 short: 12 -> 3
 receiver 12 long:  12 -> 3 -> 7 -> 8 -> 4
 
 receiver 10 short: 10 -> 6 -> 2
-receiver 10 long:  10 -> 6 -> 7 -> 8 -> 9
+receiver 10 long:  10 -> 6 -> 7 -> 3 -> 12
 
-receiver 11 short: 11 -> 9
-receiver 11 long:  11 -> 9 -> 8 -> 7
+receiver 0 short:  0 -> 7
+receiver 0 long:   0 -> 7 -> 8 -> 4
+
+receiver 1 short:  1 -> 7
+receiver 1 long:   1 -> 7 -> 8 -> 9 -> 5
 
 receiver 2 short:   2 -> 6
-receiver 2 long:    2 -> 6 -> 7 -> 8 -> 9 -> 11
+receiver 2 long:    2 -> 6 -> 7 -> 1
 ```
-
-The repeated `8 -> 8` in the original receiver-2 path is treated as a typo and
-replaced with the `8 -> 9 -> 11` path shown by the topology diagram.
 
 The graph is intentionally irregular. `GraphTopology` allocates the maximum
 uplink count and leaves nonexistent ports empty; routing still follows only the
@@ -31,7 +31,7 @@ explicit paths in `topologies/multibottleneck_13tor_graph.txt`.
 
 ## Ordering cases
 
-Each wave contains the eight flows above:
+Each wave contains the ten flows above:
 
 - `short_first`: short flow starts 1 microsecond before its paired long flow.
 - `long_first`: long flow starts 1 microsecond before its paired short flow.
@@ -76,7 +76,7 @@ must rebuild the simulator. Use `--no-build` only after that build succeeds.
 
 - `summary.csv`: one row per ordering case and `short`, `long`, or `all` class.
 - `order_comparison.csv`: direct short-first versus long-first relative changes.
-- `per_receiver.csv`: class metrics split across receivers 12, 10, 11, and 2.
+- `per_receiver.csv`: class metrics split across receivers 0, 1, 2, 10, and 12.
 - `per_flow.csv`: FCT, per-flow goodput, credit reasons, and waste for every flow.
 - `per_queue.csv`: queue hotspots for every ordering case.
 
