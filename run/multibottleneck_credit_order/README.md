@@ -89,3 +89,20 @@ The primary ordering comparison is class-specific: short-flow performance under
 `short_first` should be compared with short-flow performance under `long_first`,
 and likewise for long flows. Aggregate metrics can hide one class benefiting at
 the expense of the other.
+
+## Isolated short-only and long-only baseline
+
+`run_isolated.sh` runs the same topology and flow endpoints without paired
+short/long competition.  `short_only` has five simultaneous short flows per
+wave; `long_only` has five simultaneous long flows per wave.  Defaults are 10
+MB per flow, 20 waves, 20 ms between waves, and a 0.5 second simulation.
+
+```bash
+bash run/multibottleneck_credit_order/run_isolated.sh --no-build \
+  --output run/multibottleneck_credit_order/results_isolated
+```
+
+The isolated experiment writes `summary.csv`, `per_receiver.csv`,
+`per_flow.csv`, `per_queue.csv`, and `isolation_comparison.csv`.  Because every
+flow in a wave starts together, the reported FCT requires no common-release
+correction.

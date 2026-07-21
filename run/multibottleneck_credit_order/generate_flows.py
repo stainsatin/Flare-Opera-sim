@@ -28,7 +28,9 @@ FLOW_PAIRS = (
     ),
 )
 
-CASES = ("short_first", "long_first", "simultaneous")
+ORDER_CASES = ("short_first", "long_first", "simultaneous")
+ISOLATED_CASES = ("short_only", "long_only")
+CASES = ORDER_CASES + ISOLATED_CASES
 
 
 def generate_rows(case, flow_size, rounds, interval_ns, order_gap_ns):
@@ -38,7 +40,11 @@ def generate_rows(case, flow_size, rounds, interval_ns, order_gap_ns):
     for round_index in range(rounds):
         base_start = round_index * interval_ns
         for short_flow, long_flow in FLOW_PAIRS:
-            if case == "short_first":
+            if case == "short_only":
+                ordered = ((short_flow, base_start),)
+            elif case == "long_only":
+                ordered = ((long_flow, base_start),)
+            elif case == "short_first":
                 ordered = ((short_flow, base_start), (long_flow, base_start + order_gap_ns))
             elif case == "long_first":
                 ordered = ((short_flow, base_start + order_gap_ns), (long_flow, base_start))

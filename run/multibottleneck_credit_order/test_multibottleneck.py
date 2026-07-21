@@ -17,6 +17,9 @@ def load_module(name, path):
 
 GENERATOR = load_module("multibottleneck_generator", HERE / "generate_flows.py")
 ANALYZER = load_module("multibottleneck_analyzer", HERE / "analyze.py")
+ISOLATED_ANALYZER = load_module(
+    "multibottleneck_isolated_analyzer", HERE / "analyze_isolated.py"
+)
 
 
 class MultiBottleneckExperimentTest(unittest.TestCase):
@@ -85,6 +88,35 @@ class MultiBottleneckExperimentTest(unittest.TestCase):
         self.assertEqual(simultaneous[0]["flow_class"], "short")
         self.assertEqual(simultaneous[10]["flow_class"], "long")
 
+    def test_generator_and_analyzer_support_isolated_rounds(self):
+        short_only = GENERATOR.generate_rows(
+            "short_only", 10_000_000, 2, 20_000_000, 0
+        )
+        long_only = GENERATOR.generate_rows(
+            "long_only", 10_000_000, 2, 20_000_000, 0
+        )
+        self.assertEqual(len(short_only), 10)
+        self.assertEqual(len(long_only), 10)
+        self.assertEqual({row["flow_class"] for row in short_only}, {"short"})
+        self.assertEqual({row["flow_class"] for row in long_only}, {"long"})
+        self.assertEqual(short_only[5]["start_ns"], 20_000_000)
+        self.assertEqual(long_only[5]["start_ns"], 20_000_000)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "short_only.htsim"
+            path.write_text(
+                "\n".join(
+                    f"{row['sender']} {row['receiver']} {row['bytes']} "
+                    f"{row['start_ns']}"
+                    for row in short_only
+                )
+                + "\n",
+                encoding="ascii",
+            )
+            parsed = ISOLATED_ANALYZER.parse_trace(path, "short_only")
+            self.assertEqual(parsed[4]["round"], 0)
+            self.assertEqual(parsed[5]["round"], 1)
+
     def test_analyzer_combines_fct_and_per_flow_credit_waste(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -146,6 +178,11 @@ class MultiBottleneckExperimentTest(unittest.TestCase):
         self.assertIn("CASES=(short_first long_first simultaneous)", script)
         self.assertIn("INTERVAL_NS=10000000", script)
         self.assertIn("ORDER_GAP_NS=1000", script)
+
+        isolated_script = (HERE / "run_isolated.sh").read_text()
+        self.assertIn("CASES=(short_only long_only)", isolated_script)
+        self.assertIn("FLOW_SIZE=10000000", isolated_script)
+        self.assertIn("INTERVAL_NS=20000000", isolated_script)
 
 
 if __name__ == "__main__":
