@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze the balanced 64-flow experiment on the dynamic 16-ToR Opera fabric."""
+"""Analyze balanced one-flow-per-host experiments on a dynamic Opera fabric."""
 
 import argparse
 import csv
@@ -68,7 +68,7 @@ def write_csv(path, rows, fieldnames):
         writer.writerows(rows)
 
 
-def parse_trace(path, hosts_per_tor, superslice_ns):
+def parse_trace(path, hosts_per_tor, tor_count, superslice_ns):
     rows = []
     with path.open(encoding="ascii") as stream:
         for flow_id, line in enumerate(stream):
@@ -89,12 +89,12 @@ def parse_trace(path, hosts_per_tor, superslice_ns):
                     "tor_offset": (
                         destination // hosts_per_tor - source // hosts_per_tor
                     )
-                    % (64 // hosts_per_tor),
+                    % tor_count,
                     "bytes": flow_size,
                     "start_ns": start_ns,
                     "start_ms": start_ns / 1_000_000.0,
                     "start_superslice": (start_ns // superslice_ns)
-                    % (64 // hosts_per_tor),
+                    % tor_count,
                 }
             )
     if not rows:
@@ -515,13 +515,18 @@ def main():
     parser.add_argument("results", type=Path)
     parser.add_argument("--simtime", type=float, required=True)
     parser.add_argument("--hosts-per-tor", type=int, default=4)
+    parser.add_argument("--tor-count", type=int, default=16)
     timing = parser.add_mutually_exclusive_group()
     timing.add_argument("--superslice-us", type=float)
     timing.add_argument("--superslice-ns", type=int)
-    parser.add_argument("--cycle-superslices", type=int, default=16)
+    parser.add_argument("--cycle-superslices", type=int)
     args = parser.parse_args()
     if args.simtime <= 0:
         parser.error("--simtime must be positive")
+    if args.hosts_per_tor <= 0:
+        parser.error("--hosts-per-tor must be positive")
+    if args.tor_count <= 1:
+        parser.error("--tor-count must be greater than one")
     if args.superslice_ns is not None and args.superslice_ns <= 0:
         parser.error("--superslice-ns must be positive")
     if args.superslice_us is not None and args.superslice_us <= 0:
@@ -533,6 +538,13 @@ def main():
         superslice_ns = round(
             (args.superslice_us if args.superslice_us is not None else 14.5) * 1000
         )
+    cycle_superslices = (
+        args.cycle_superslices
+        if args.cycle_superslices is not None
+        else args.tor_count
+    )
+    if cycle_superslices <= 0:
+        parser.error("--cycle-superslices must be positive")
 
     log_path = args.results / "uniform.log"
     trace_path = args.results / "traffic" / "uniform.htsim"
@@ -544,6 +556,7 @@ def main():
     trace = parse_trace(
         trace_path,
         args.hosts_per_tor,
+        args.tor_count,
         superslice_ns,
     )
     parsed = parse_log(log_path)
@@ -555,7 +568,7 @@ def main():
         parsed,
         args.simtime,
         args.hosts_per_tor,
-        superslice_ns / 1000.0 * args.cycle_superslices,
+        superslice_ns / 1000.0 * cycle_superslices,
     )
     tor_rows = build_tor_rows(flow_rows, parsed["queues"], args.hosts_per_tor)
 

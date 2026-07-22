@@ -20,13 +20,12 @@
 #include "hbhpacket.h"
 
 Pipe::Pipe(simtime_picosec delay, EventList& eventlist)
-: EventSource(eventlist,"pipe"), _delay(delay)
+: EventSource(eventlist,"pipe"), _bytes_delivered(0), _bytes_input(0),
+  _delay(delay)
 {
     //stringstream ss;
     //ss << "pipe(" << delay/1000000 << "us)";
     //_nodename= ss.str();
-
-    _bytes_delivered = 0;
 
 }
 
