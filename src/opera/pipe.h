@@ -61,5 +61,13 @@ extern uint64_t __global_network_tot_hops;
 extern uint64_t __global_network_tot_hops_samples;
 extern uint64_t __global_network_tot_valid_creds;
 extern uint64_t __global_network_tot_cred_waste;
+extern uint64_t __global_topology_clipped_credits;
+extern uint64_t __global_topology_clipped_data;
+extern uint64_t __global_topology_clipped_control;
+extern uint64_t __global_topology_clipped_other;
+extern uint64_t __global_topology_wrong_dst_credits;
+extern uint64_t __global_topology_wrong_dst_data;
+extern uint64_t __global_topology_wrong_dst_control;
+extern uint64_t __global_topology_wrong_dst_other;
 
 #endif

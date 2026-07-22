@@ -29,9 +29,15 @@ struct FlowCreditCounters {
     uint64_t shaping_checks = 0;
     uint64_t shaping_admitted = 0;
     uint64_t waste_hops = 0;
+    uint64_t topology = 0;
+    uint32_t path_hops_min = 0;
+    uint32_t path_hops_max = 0;
+    uint64_t path_hops_sum = 0;
 };
 
 void reportFlowCreditStats();
+void recordFlowCreditTopologyDrop(
+    Packet& pkt, uint32_t consumed_hops, bool undo_delivery = false);
 
 class CreditQueue : public Queue {
  public:

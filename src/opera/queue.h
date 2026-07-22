@@ -31,6 +31,7 @@ class Queue : public EventSource, public PacketSink {
     // should really be private, but loggers want to see
     mem_b _maxsize; 
     mem_b _max_recorded_size;
+    mem_b _max_ever_recorded_size;
     vector <mem_b> _max_recorded_size_slice;
     int _tor; // the ToR switch this queue belongs to
     int _port; // the port this queue belongs to
@@ -45,6 +46,7 @@ class Queue : public EventSource, public PacketSink {
     virtual mem_b queuesize();
     simtime_picosec serviceTime();
     int num_drops() const {return _num_drops;}
+    mem_b max_ever_recorded_size() const {return _max_ever_recorded_size;}
     void reset_drops() {_num_drops = 0;}
 
     virtual void setRemoteEndpoint(Queue* q) {_remoteEndpoint = q;};

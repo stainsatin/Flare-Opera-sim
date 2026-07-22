@@ -45,6 +45,16 @@ static void recordFlowCreditDrop(Packet& pkt, uint64_t FlowCreditCounters::*reas
   counters.waste_hops += max(pkt.get_crthop(), 0);
 }
 
+void recordFlowCreditTopologyDrop(
+    Packet& pkt, uint32_t consumed_hops, bool undo_delivery) {
+  FlowCreditCounters& counters = flowCreditCounters(pkt);
+  if (undo_delivery && counters.delivered > 0) counters.delivered--;
+  counters.dropped++;
+  counters.topology++;
+  counters.waste_hops += consumed_hops;
+  __global_network_tot_cred_waste += consumed_hops;
+}
+
 #define NO_PENDING_TX (simtime_picosec)(-1); // unsigned so max unit
 
 #define SYMM_ROUTING
@@ -268,7 +278,14 @@ void CreditQueue::receivePacket(Packet &pkt) {
     _tot_creds++;
     FlowCreditCounters& counters = flowCreditCounters(pkt);
     counters.queue_arrivals++;
-    if (_is_nic) counters.generated++;
+    if (_is_nic) {
+      uint32_t path_hops = max(pkt.get_maxhops(), 0);
+      if (counters.generated == 0) counters.path_hops_min = path_hops;
+      counters.generated++;
+      counters.path_hops_min = min(counters.path_hops_min, path_hops);
+      counters.path_hops_max = max(counters.path_hops_max, path_hops);
+      counters.path_hops_sum += path_hops;
+    }
     // cout << "xpcredit\n";
     if (queuesize_cred(prio) + pkt.size() > _maxsize_cred) {
       // if the credit doesn't fit in the queue, drop it
@@ -319,6 +336,8 @@ void CreditQueue::receivePacket(Packet &pkt) {
     _enqueued.push_front(&pkt);
     pkt.inc_queueing(_queuesize);
     _queuesize += pkt.size();
+    _max_recorded_size = max(_max_recorded_size, _queuesize);
+    _max_ever_recorded_size = max(_max_ever_recorded_size, _queuesize);
     pkt.set_last_queueing(_queuesize);
     updatePktIn(pkt.flow_id());
     // cout << "enqueued xpdata\n";
@@ -430,7 +449,8 @@ void CreditQueue::reportCreditStats(const string& scope, int id, int port) {
 void reportFlowCreditStats() {
   cout << "# FlowCreditStats flow_id sender receiver path_hops generated "
        << "delivered queue_arrivals queue_transmissions dropped overflow "
-       << "timeout shaping tentative shaping_checks shaping_admitted waste_hops"
+       << "timeout shaping tentative shaping_checks shaping_admitted waste_hops "
+       << "topology path_hops_min path_hops_max path_hops_sum"
        << endl;
   for (map<uint32_t, FlowCreditCounters>::const_iterator it =
            flow_credit_counters.begin();
@@ -443,7 +463,9 @@ void reportFlowCreditStats() {
          << " " << counters.dropped << " " << counters.overflow << " "
          << counters.timeout << " " << counters.shaping << " "
          << counters.tentative << " " << counters.shaping_checks << " "
-         << counters.shaping_admitted << " " << counters.waste_hops << endl;
+         << counters.shaping_admitted << " " << counters.waste_hops << " "
+         << counters.topology << " " << counters.path_hops_min << " "
+         << counters.path_hops_max << " " << counters.path_hops_sum << endl;
   }
 }
 

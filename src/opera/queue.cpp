@@ -10,6 +10,7 @@
 #include "queue_lossless.h"
 
 #include "pipe.h"
+#include "creditqueue.h"
 
 #include "rlb.h" // needed to make dummy packet
 #include "tcp.h"
@@ -22,6 +23,8 @@ Queue::Queue(linkspeed_bps bitrate, mem_b maxsize, EventList& eventlist, QueueLo
     _logger(logger), _bitrate(bitrate), _num_drops(0)
 {
     _queuesize = 0;
+    _max_recorded_size = 0;
+    _max_ever_recorded_size = 0;
     _byteps = _bitrate/8;
     _ps_per_byte = (simtime_picosec)((pow(10.0, 12.0) * 8) / _bitrate);
     stringstream ss;
@@ -37,6 +40,7 @@ Queue::Queue(linkspeed_bps bitrate, mem_b maxsize, EventList& eventlist, QueueLo
     _logger(logger), _bitrate(bitrate), _num_drops(0)
 {
     _queuesize = 0;
+    _max_ever_recorded_size = 0;
     _ps_per_byte = (simtime_picosec)((pow(10.0, 12.0) * 8) / _bitrate);
     stringstream ss;
     _max_recorded_size_slice.resize(_top->get_nsuperslice());
@@ -121,16 +125,28 @@ void Queue::sendFromQueue(Packet* pkt) {
                     }
                     case XPDATA:
 		    {
+                        __global_topology_wrong_dst_data++;
                         cout << "!!! XPDATA";
                         break;
 		    }
                     case XPCREDIT:
+                        __global_topology_wrong_dst_credits++;
+                        recordFlowCreditTopologyDrop(
+                            *pkt, max(pkt->get_crthop(), 0), true);
                         cout << "!!! XPCREDIT";
+                        break;
+                    case XPCTL:
+                        __global_topology_wrong_dst_control++;
+                        cout << "!!! XPCTL";
                         break;
                     case HBHDATA:
                     {
                         cout << "!!! HBHDATA";
+                        break;
                     }
+                    default:
+                        __global_topology_wrong_dst_other++;
+                        break;
                 }
                 cout << " packet dropped at " << nodename() << ": port & dst didn't match! (queue.cpp)" << endl;
                 cout << "    ToR = " << pkt->get_crtToR() << ", port = " << pkt->get_crtport() <<
@@ -194,6 +210,8 @@ void Queue::receivePacket(Packet& pkt) {
     bool queueWasEmpty = _enqueued.empty();
     _enqueued.push_front(&pkt);
     _queuesize += pkt.size();
+    _max_recorded_size = max(_max_recorded_size, _queuesize);
+    _max_ever_recorded_size = max(_max_ever_recorded_size, _queuesize);
     pkt.inc_queueing(_queuesize);
 
     if (queueWasEmpty) {

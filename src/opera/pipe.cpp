@@ -15,6 +15,7 @@
 #include "rlbpacket.h" // added for debugging
 #include "xpass.h"
 #include "xpasspacket.h"
+#include "creditqueue.h"
 #include "hbh.h"
 #include "hbhpacket.h"
 
@@ -212,6 +213,23 @@ void Pipe::sendFromPipe(Packet *pkt) {
             } else { // the rotor switch is down, "drop" the packet
 
                 switch (pkt->type()) {
+                    case XPCREDIT:
+                        __global_topology_clipped_credits++;
+                        recordFlowCreditTopologyDrop(
+                            *pkt, max(pkt->get_crthop() + 1, 1));
+                        break;
+                    case XPDATA:
+                        __global_topology_clipped_data++;
+                        break;
+                    case XPCTL:
+                        __global_topology_clipped_control++;
+                        break;
+                    default:
+                        __global_topology_clipped_other++;
+                        break;
+                }
+
+                switch (pkt->type()) {
                     case RLB:
                         {
                             // for now, let's just return the packet rather than implementing the RLB NACK mechanism
@@ -346,6 +364,14 @@ uint64_t __global_network_tot_hops = 0;
 uint64_t __global_network_tot_hops_samples = 0;
 uint64_t __global_network_tot_valid_creds = 0;
 uint64_t __global_network_tot_cred_waste = 0;
+uint64_t __global_topology_clipped_credits = 0;
+uint64_t __global_topology_clipped_data = 0;
+uint64_t __global_topology_clipped_control = 0;
+uint64_t __global_topology_clipped_other = 0;
+uint64_t __global_topology_wrong_dst_credits = 0;
+uint64_t __global_topology_wrong_dst_data = 0;
+uint64_t __global_topology_wrong_dst_control = 0;
+uint64_t __global_topology_wrong_dst_other = 0;
 
 UtilMonitor::UtilMonitor(DynExpTopology* top, EventList &eventlist)
   : EventSource(eventlist,"utilmonitor"), _top(top)
