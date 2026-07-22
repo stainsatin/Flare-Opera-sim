@@ -79,7 +79,11 @@ if [[ ! -f "${TOPOLOGY}" ]]; then
 fi
 
 if [[ "${BUILD}" == yes || ( "${BUILD}" == auto && ! -x "${SIMULATOR}" ) ]]; then
-    echo "Building dynamic Opera simulator..."
+    echo "Clean-building dynamic Opera simulator..."
+    # The upstream Makefiles do not track all cross-directory header
+    # dependencies. A clean build is required after Queue layout changes.
+    make -C "${ROOT_DIR}/src/opera/datacenter" clean
+    make -C "${ROOT_DIR}/src/opera" clean
     make -C "${ROOT_DIR}/src/opera"
     make -C "${ROOT_DIR}/src/opera/datacenter" htsim_xpass_dynexpTopology
 elif [[ ! -x "${SIMULATOR}" ]]; then

@@ -47,6 +47,12 @@ bash run/opera_16tor_uniform/run.sh \
   --output run/opera_16tor_uniform/results_32MiB_cycle_spread
 ```
 
+`--build` performs a clean rebuild of both `src/opera` and
+`src/opera/datacenter`. This is necessary because the upstream Makefiles do not
+track every cross-directory header dependency; an incremental build after a
+`Queue` layout change can link ABI-incompatible object files and corrupt the
+heap.
+
 Synchronized comparison:
 
 ```bash
