@@ -195,11 +195,11 @@ def generate_topology(
         graph = active_graph(tors, assignment, schedule, superslice)
         routes = {}
         for source in range(tors):
-            for destination in range(tors):
-                if source == destination:
-                    continue
+            for destination in range(source + 1, tors):
                 rotor_path = shortest_path(graph, source, destination)
-                routes[source, destination] = [downlinks + rotor for rotor in rotor_path]
+                ports = [downlinks + rotor for rotor in rotor_path]
+                routes[source, destination] = ports
+                routes[destination, source] = list(reversed(ports))
         for phase in range(3):
             lines.append(str(3 * superslice + phase))
             for source in range(tors):
@@ -244,6 +244,7 @@ def validate_topology(path):
             raise RuntimeError(f"missing route section for slice {slice_index}")
         cursor += 1
         seen = set()
+        routes = {}
         for _ in range(tors * (tors - 1)):
             fields = list(map(int, lines[cursor].split()))
             cursor += 1
@@ -251,6 +252,7 @@ def validate_topology(path):
             if (source, destination) in seen or source == destination or not ports:
                 raise RuntimeError(f"invalid route in slice {slice_index}")
             seen.add((source, destination))
+            routes[source, destination] = ports
             current = source
             for port in ports:
                 rotor = port - downlinks
@@ -263,6 +265,15 @@ def validate_topology(path):
                 raise RuntimeError(
                     f"route {source}->{destination} ends at {current} in slice {slice_index}"
                 )
+        for source in range(tors):
+            for destination in range(source + 1, tors):
+                if routes[source, destination] != list(
+                    reversed(routes[destination, source])
+                ):
+                    raise RuntimeError(
+                        f"routes {source}->{destination} and {destination}->{source} "
+                        f"are not symmetric in slice {slice_index}"
+                    )
     if cursor != len(lines):
         raise RuntimeError("unexpected trailing topology records")
 

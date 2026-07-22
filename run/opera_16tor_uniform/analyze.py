@@ -515,11 +515,24 @@ def main():
     parser.add_argument("results", type=Path)
     parser.add_argument("--simtime", type=float, required=True)
     parser.add_argument("--hosts-per-tor", type=int, default=4)
-    parser.add_argument("--superslice-us", type=float, default=14.5)
+    timing = parser.add_mutually_exclusive_group()
+    timing.add_argument("--superslice-us", type=float)
+    timing.add_argument("--superslice-ns", type=int)
     parser.add_argument("--cycle-superslices", type=int, default=16)
     args = parser.parse_args()
     if args.simtime <= 0:
         parser.error("--simtime must be positive")
+    if args.superslice_ns is not None and args.superslice_ns <= 0:
+        parser.error("--superslice-ns must be positive")
+    if args.superslice_us is not None and args.superslice_us <= 0:
+        parser.error("--superslice-us must be positive")
+
+    if args.superslice_ns is not None:
+        superslice_ns = args.superslice_ns
+    else:
+        superslice_ns = round(
+            (args.superslice_us if args.superslice_us is not None else 14.5) * 1000
+        )
 
     log_path = args.results / "uniform.log"
     trace_path = args.results / "traffic" / "uniform.htsim"
@@ -531,7 +544,7 @@ def main():
     trace = parse_trace(
         trace_path,
         args.hosts_per_tor,
-        round(args.superslice_us * 1000),
+        superslice_ns,
     )
     parsed = parse_log(log_path)
     flow_rows = build_flow_rows(trace, parsed)
@@ -542,7 +555,7 @@ def main():
         parsed,
         args.simtime,
         args.hosts_per_tor,
-        args.superslice_us * args.cycle_superslices,
+        superslice_ns / 1000.0 * args.cycle_superslices,
     )
     tor_rows = build_tor_rows(flow_rows, parsed["queues"], args.hosts_per_tor)
 

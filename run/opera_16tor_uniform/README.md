@@ -1,7 +1,14 @@
 # Balanced 64-flow experiment on the 16-ToR Opera topology
 
-This experiment provides one finite inter-ToR flow per host on
-`topologies/opera_16tor_4host_15us.txt`.
+This experiment provides one finite inter-ToR flow per host. Its default
+topology is `topologies/opera_16tor_4host_55us.txt`, whose superslice is:
+
+```text
+53.38 us epsilon + 0.62 us delta + 1.0 us reconfiguration = 55 us
+```
+
+The 55 us topology and the retained 14.5 us control topology use the same
+rotor schedule and strictly symmetric routes. Only their timing differs.
 
 ## Traffic matrix
 
@@ -21,7 +28,7 @@ per-ToR ingress and egress bytes. With only four hosts per ToR, a single
 one-flow-per-host round cannot cover all 15 remote destination ToRs.
 
 The recommended `cycle_spread` start mode places four flow starts in each of
-the 16 superslices of one 232 us topology cycle. Every flow starts 1 us into
+the 16 superslices of one 880 us topology cycle. Every flow starts 1 us into
 its assigned epsilon phase. This avoids a single synchronized first-window
 burst and samples every logical topology equally. The flows are large enough
 to overlap for many topology cycles.
@@ -46,6 +53,19 @@ bash run/opera_16tor_uniform/run.sh \
   --simtime 0.05 \
   --output run/opera_16tor_uniform/results_32MiB_cycle_spread
 ```
+
+Run the otherwise identical 14.5 us timing control with:
+
+```bash
+bash run/opera_16tor_uniform/run.sh \
+  --no-build \
+  --topology topologies/opera_16tor_4host_15us.txt \
+  --output run/opera_16tor_uniform/results_32MiB_cycle_spread_15us
+```
+
+`run.sh` reads the timing header from the selected topology and passes the
+duration to both flow generation and result analysis. There is no separate
+hard-coded 14.5/55 us value to keep synchronized.
 
 `--build` performs a clean rebuild of both `src/opera` and
 `src/opera/datacenter`. This is necessary because the upstream Makefiles do not
@@ -118,7 +138,8 @@ delivered to host downlinks while flows are active.
 ```bash
 python3 run/opera_16tor_uniform/analyze.py \
   run/opera_16tor_uniform/results_32MiB_cycle_spread \
-  --simtime 0.05
+  --simtime 0.05 \
+  --superslice-ns 55000
 ```
 
 ## Tests

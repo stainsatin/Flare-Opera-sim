@@ -46,7 +46,7 @@ class GenerateFlowsTest(unittest.TestCase):
     def test_probability_file_covers_path_hops_plus_jitter(self):
         root = Path(__file__).resolve().parents[2]
         topology_lines = (
-            root / "topologies/opera_16tor_4host_15us.txt"
+            root / "topologies/opera_16tor_4host_55us.txt"
         ).read_text(encoding="ascii").splitlines()
         slices = int(topology_lines[1].split()[0])
         route_lines = topology_lines[2 + slices :]

@@ -25,11 +25,18 @@ class SmallOperaTopologyTest(unittest.TestCase):
                     pairs.add((source, destination))
         self.assertEqual(len(pairs), 16 * 17 // 2)
 
-    def test_committed_topology_is_valid(self):
-        topology = ROOT / "topologies/opera_16tor_4host_15us.txt"
-        GENERATOR.validate_topology(topology)
-        first_line = topology.read_text(encoding="ascii").splitlines()[0]
-        self.assertEqual(first_line, "64 4 4 16")
+    def test_committed_topologies_are_valid(self):
+        expected_timing = {
+            "opera_16tor_4host_15us.txt": "48 12880000 620000 1000000",
+            "opera_16tor_4host_55us.txt": "48 53380000 620000 1000000",
+        }
+        for filename, timing in expected_timing.items():
+            with self.subTest(topology=filename):
+                topology = ROOT / "topologies" / filename
+                GENERATOR.validate_topology(topology)
+                lines = topology.read_text(encoding="ascii").splitlines()
+                self.assertEqual(lines[0], "64 4 4 16")
+                self.assertEqual(lines[1], timing)
 
 
 if __name__ == "__main__":

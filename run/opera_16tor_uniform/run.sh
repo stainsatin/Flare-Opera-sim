@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 ROOT_DIR=$(cd "${SCRIPT_DIR}/../.." && pwd -P)
 SIMULATOR="${ROOT_DIR}/src/opera/datacenter/htsim_xpass_dynexpTopology"
-TOPOLOGY="${ROOT_DIR}/topologies/opera_16tor_4host_15us.txt"
+TOPOLOGY="${ROOT_DIR}/topologies/opera_16tor_4host_55us.txt"
 PROBFILE="${ROOT_DIR}/run/pfun_exp2.txt"
 
 SIMTIME=0.05
@@ -37,6 +37,7 @@ Options:
   --aeolus PACKETS          Unscheduled-data allowance (default: 8)
   --tent PACKETS            Tentative credit threshold (default: 2)
   --probfile FILE           Credit hop-probability file
+  --topology FILE           Dynamic Opera topology (default: 55 us superslices)
   --no-shaping              Disable probabilistic admission shaping
   --output DIR              Result directory
   --build                   Always build the dynamic Opera executable
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --aeolus) AEOLUS_QUEUE="$2"; shift 2 ;;
         --tent) TENTATIVE_QUEUE="$2"; shift 2 ;;
         --probfile) PROBFILE="$2"; shift 2 ;;
+        --topology) TOPOLOGY="$2"; shift 2 ;;
         --no-shaping) SHAPING_ENABLED=no; shift ;;
         --output) OUTPUT_DIR="$2"; shift 2 ;;
         --build) BUILD=yes; shift ;;
@@ -77,6 +79,18 @@ if [[ ! -f "${TOPOLOGY}" ]]; then
     echo "Topology not found: ${TOPOLOGY}" >&2
     exit 1
 fi
+
+read -r TOPOLOGY_SLICES EPSILON_PS DELTA_PS RECONFIG_PS < <(sed -n '2p' "${TOPOLOGY}")
+if [[ -z "${RECONFIG_PS:-}" ]]; then
+    echo "Invalid topology timing header: ${TOPOLOGY}" >&2
+    exit 1
+fi
+SUPERSLICE_PS=$((EPSILON_PS + DELTA_PS + RECONFIG_PS))
+if (( SUPERSLICE_PS <= 0 || SUPERSLICE_PS % 1000 != 0 )); then
+    echo "Topology superslice duration must be a positive whole number of ns" >&2
+    exit 1
+fi
+SUPERSLICE_NS=$((SUPERSLICE_PS / 1000))
 
 if [[ "${BUILD}" == yes || ( "${BUILD}" == auto && ! -x "${SIMULATOR}" ) ]]; then
     echo "Clean-building dynamic Opera simulator..."
@@ -100,7 +114,8 @@ python3 "${SCRIPT_DIR}/generate_flows.py" \
     --output "${FLOWFILE}" \
     --flow-size-mib "${FLOW_SIZE_MIB}" \
     --start-mode "${START_MODE}" \
-    --base-start-ns "${BASE_START_NS}"
+    --base-start-ns "${BASE_START_NS}" \
+    --superslice-ns "${SUPERSLICE_NS}"
 
 if [[ "${SHAPING_ENABLED}" == yes ]]; then
     if [[ ! -f "${PROBFILE}" ]]; then
@@ -140,6 +155,7 @@ COMMAND=(
 
 printf '%q ' "${COMMAND[@]}" > "${OUTPUT_DIR}/command.txt"
 printf '\n' >> "${OUTPUT_DIR}/command.txt"
+echo "Topology superslice: ${SUPERSLICE_NS} ns"
 echo "Running 64 balanced flows for ${SIMTIME}s..."
 if "${COMMAND[@]}" > "${STDOUT_LOG}" 2>&1; then
     echo "Simulation completed."
@@ -150,4 +166,6 @@ else
     exit "${status}"
 fi
 
-python3 "${SCRIPT_DIR}/analyze.py" "${OUTPUT_DIR}" --simtime "${SIMTIME}"
+python3 "${SCRIPT_DIR}/analyze.py" "${OUTPUT_DIR}" \
+    --simtime "${SIMTIME}" \
+    --superslice-ns "${SUPERSLICE_NS}"
