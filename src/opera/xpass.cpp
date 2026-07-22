@@ -769,7 +769,7 @@ static map<int,double> hops_to_prob = {{-1,1.0},{1,1.0}, {2,0.50}, {3,0.25}, {4,
 int
 XPassSink::hopJitter(int hop) {
   assert(hop > 0);
-  assert(hop <= 5);
+  assert(hop < _src->_top->no_of_tors());
   //jitter disabled
   if(_jit_alpha <= 0 || _jit_beta <= 0) {
     return hop;

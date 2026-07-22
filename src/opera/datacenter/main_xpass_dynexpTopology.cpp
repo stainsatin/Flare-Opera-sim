@@ -94,17 +94,9 @@ map<int,double> read_probfun(string fname){
     map<int,double> hop_to_prob;
     ifstream input(fname);
     if (input.is_open()){
-        string line;
-        int64_t temp;
-        // get flows. Format: (src) (dst) (bytes) (starttime microseconds)
-        while(!input.eof()){
-            vector<int64_t> vtemp;
-            getline(input, line);
-            if(line.length() <= 0) continue;
-            stringstream stream(line);
-            int hops;
-            double prob;
-            stream >> hops >> prob;
+        int hops;
+        double prob;
+        while(input >> hops >> prob){
             hop_to_prob[hops] = prob;
             cout << hops << " " << prob << " " << hop_to_prob[hops] << endl;
         }

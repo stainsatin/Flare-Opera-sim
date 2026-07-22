@@ -137,6 +137,13 @@ COMMAND=(
 printf '%q ' "${COMMAND[@]}" > "${OUTPUT_DIR}/command.txt"
 printf '\n' >> "${OUTPUT_DIR}/command.txt"
 echo "Running 64 balanced flows for ${SIMTIME}s..."
-"${COMMAND[@]}" > "${STDOUT_LOG}" 2>&1
+if "${COMMAND[@]}" > "${STDOUT_LOG}" 2>&1; then
+    echo "Simulation completed."
+else
+    status=$?
+    echo "Simulation failed with exit code ${status}. Last 80 log lines:" >&2
+    tail -n 80 "${STDOUT_LOG}" >&2
+    exit "${status}"
+fi
 
 python3 "${SCRIPT_DIR}/analyze.py" "${OUTPUT_DIR}" --simtime "${SIMTIME}"

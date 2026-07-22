@@ -65,8 +65,10 @@ Aeolus allowance   8 packets
 tentative limit     2 credits
 ```
 
-`run/pfun_exp2.txt` now includes hop 8 because superslices 12-14 in the small
-topology can have eight-hop routes.
+`run/pfun_exp2.txt` now includes hops 8 and 9 because superslices 12-14 in the
+small topology can have eight-hop routes and hop jitter may add one shaping
+distance level. The original Flare `hopJitter()` five-hop assertion is also
+generalized to the active topology size.
 
 ## Outputs
 

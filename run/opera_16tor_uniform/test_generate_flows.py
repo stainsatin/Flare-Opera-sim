@@ -43,6 +43,29 @@ class GenerateFlowsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             generate_flows.build_flows(offsets=(0, 1, 5, 9))
 
+    def test_probability_file_covers_path_hops_plus_jitter(self):
+        root = Path(__file__).resolve().parents[2]
+        topology_lines = (
+            root / "topologies/opera_16tor_4host_15us.txt"
+        ).read_text(encoding="ascii").splitlines()
+        slices = int(topology_lines[1].split()[0])
+        route_lines = topology_lines[2 + slices :]
+        max_hops = max(
+            len(line.split()) - 2 for line in route_lines if len(line.split()) > 2
+        )
+        probabilities = {
+            int(hops): float(probability)
+            for hops, probability in (
+                line.split()
+                for line in (root / "run/pfun_exp2.txt")
+                .read_text(encoding="ascii")
+                .splitlines()
+                if line.strip()
+            )
+        }
+        self.assertEqual(max_hops, 8)
+        self.assertIn(max_hops + 1, probabilities)
+
 
 if __name__ == "__main__":
     unittest.main()
