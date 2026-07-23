@@ -81,6 +81,47 @@ class TwoHostAllToAllExperimentTest(unittest.TestCase):
         )
         self.assertEqual(set(receiver_starts.values()), {1})
 
+    def test_sparse_flow_matrix_is_balanced_and_symmetric(self):
+        flows = FLOWS.build_flows(flow_size_bytes=1024, fanout=64)
+        offsets = {flow["offset"] for flow in flows}
+        self.assertEqual(len(flows), 13_824)
+        self.assertEqual(len(offsets), 64)
+        self.assertTrue(all((108 - offset) % 108 in offsets for offset in offsets))
+        self.assertEqual(
+            Counter(flow["source"] for flow in flows),
+            Counter({host: 64 for host in range(216)}),
+        )
+        self.assertEqual(
+            Counter(flow["destination"] for flow in flows),
+            Counter({host: 64 for host in range(216)}),
+        )
+        self.assertEqual(
+            set(Counter(
+                (flow["source_tor"], flow["destination_tor"])
+                for flow in flows
+            ).values()),
+            {2},
+        )
+
+    def test_staggered_sparse_starts_are_balanced_and_unique(self):
+        flows = FLOWS.build_flows(
+            flow_size_bytes=512 * 1024,
+            fanout=64,
+            start_mode="staggered",
+            active_window_ns=44_500,
+            spread_superslices=72,
+        )
+        starts = Counter(flow["start_superslice"] for flow in flows)
+        self.assertEqual(
+            starts, Counter({slice_index: 192 for slice_index in range(72)})
+        )
+        self.assertEqual(len({flow["start_ns"] for flow in flows}), len(flows))
+        self.assertTrue(all(flow["start_ns"] % 54_500 < 44_500 for flow in flows))
+        receiver_starts = Counter(
+            (flow["destination"], flow["start_superslice"]) for flow in flows
+        )
+        self.assertEqual(set(receiver_starts.values()), {1})
+
     def test_shared_analyzer_uses_two_host_tor_mapping(self):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "uniform.htsim"
@@ -129,6 +170,9 @@ class TwoHostAllToAllExperimentTest(unittest.TestCase):
         run_script = (HERE / "run.sh").read_text(encoding="ascii")
         self.assertIn("j < _nul * _ntor", topology_source)
         self.assertIn("--scheduler MODE", run_script)
+        self.assertIn("--fanout COUNT", run_script)
+        self.assertIn("--spread-superslices N", run_script)
+        self.assertIn("cycle_spread|staggered|synchronized", run_script)
         self.assertIn("priority_args=(-rxhopprio)", run_script)
         self.assertIn("run_case fifo", run_script)
         self.assertIn("run_case rxhopprio", run_script)

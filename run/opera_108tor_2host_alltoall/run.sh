@@ -11,7 +11,10 @@ PROBFILE="${ROOT_DIR}/run/pfun_exp2.txt"
 SIMTIME=0.1
 UTILTIME=0.1
 FLOW_SIZE_MIB=1
+FANOUT=107
 START_MODE=cycle_spread
+START_STRIDE=53
+SPREAD_SUPERSLICES=108
 BASE_START_NS=1000
 SCHEDULER=both
 CWND=40
@@ -30,8 +33,11 @@ Usage: bash run/opera_108tor_2host_alltoall/run.sh [options]
 
 Options:
   --scheduler MODE          fifo, rxhopprio, or both (default: both)
-  --flow-size-mib MIB       Size of each of the 23,112 flows (default: 1)
-  --start-mode MODE         cycle_spread or synchronized (default: cycle_spread)
+  --flow-size-mib MIB       Size of every flow (default: 1)
+  --fanout COUNT            Remote ToRs contacted by each host, 1..107 (default: 107)
+  --start-mode MODE         cycle_spread, staggered, or synchronized
+  --start-stride COUNT      Staggered receiver phase stride (default: 53)
+  --spread-superslices N    Staggered release-window length (default: 108)
   --base-start-ns NS        Earliest flow start time (default: 1000)
   --simtime SECONDS         Simulation duration (default: 0.1)
   --utiltime MS             Utilization sampling interval (default: 0.1)
@@ -62,13 +68,16 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --flow-size-mib) FLOW_SIZE_MIB="$2"; shift 2 ;;
+        --fanout) FANOUT="$2"; shift 2 ;;
         --start-mode)
             case "$2" in
-                cycle_spread|synchronized) START_MODE="$2" ;;
-                *) echo "--start-mode must be cycle_spread or synchronized" >&2; exit 2 ;;
+                cycle_spread|staggered|synchronized) START_MODE="$2" ;;
+                *) echo "--start-mode must be cycle_spread, staggered, or synchronized" >&2; exit 2 ;;
             esac
             shift 2
             ;;
+        --start-stride) START_STRIDE="$2"; shift 2 ;;
+        --spread-superslices) SPREAD_SUPERSLICES="$2"; shift 2 ;;
         --base-start-ns) BASE_START_NS="$2"; shift 2 ;;
         --simtime) SIMTIME="$2"; shift 2 ;;
         --utiltime) UTILTIME="$2"; shift 2 ;;
@@ -118,6 +127,12 @@ if (( SUPERSLICE_PS <= 0 || SUPERSLICE_PS % 1000 != 0 )); then
 fi
 SUPERSLICE_NS=$((SUPERSLICE_PS / 1000))
 CYCLE_NS=$((SUPERSLICE_NS * TORS))
+ACTIVE_WINDOW_PS=$((EPSILON_PS + DELTA_PS))
+if (( ACTIVE_WINDOW_PS <= 0 || ACTIVE_WINDOW_PS % 1000 != 0 )); then
+    echo "Topology active window must be a positive whole number of ns" >&2
+    exit 1
+fi
+ACTIVE_WINDOW_NS=$((ACTIVE_WINDOW_PS / 1000))
 
 if [[ "${BUILD}" == yes || ( "${BUILD}" == auto && ! -x "${SIMULATOR}" ) ]]; then
     echo "Clean-building dynamic Opera simulator..."
@@ -135,9 +150,14 @@ SHARED_FLOWFILE="${OUTPUT_ROOT}/workload/uniform.htsim"
 python3 "${SCRIPT_DIR}/generate_flows.py" \
     --output "${SHARED_FLOWFILE}" \
     --flow-size-mib "${FLOW_SIZE_MIB}" \
+    --fanout "${FANOUT}" \
     --start-mode "${START_MODE}" \
+    --start-stride "${START_STRIDE}" \
+    --spread-superslices "${SPREAD_SUPERSLICES}" \
     --base-start-ns "${BASE_START_NS}" \
-    --superslice-ns "${SUPERSLICE_NS}"
+    --superslice-ns "${SUPERSLICE_NS}" \
+    --active-window-ns "${ACTIVE_WINDOW_NS}"
+FLOW_COUNT=$(wc -l < "${SHARED_FLOWFILE}")
 
 if [[ "${SHAPING_ENABLED}" == yes ]]; then
     if [[ ! -f "${PROBFILE}" ]]; then
@@ -190,7 +210,7 @@ run_case() {
 
     printf '%q ' "${command[@]}" > "${case_dir}/command.txt"
     printf '\n' >> "${case_dir}/command.txt"
-    echo "Running ${case_name}: 23,112 flows for ${SIMTIME}s..."
+    echo "Running ${case_name}: ${FLOW_COUNT} flows for ${SIMTIME}s..."
     if "${command[@]}" > "${stdout_log}" 2>&1; then
         echo "${case_name} simulation completed."
     else
@@ -208,7 +228,7 @@ run_case() {
         --superslice-ns "${SUPERSLICE_NS}"
 }
 
-echo "Topology superslice: ${SUPERSLICE_NS} ns; full cycle: ${CYCLE_NS} ns"
+echo "Topology superslice: ${SUPERSLICE_NS} ns; active window: ${ACTIVE_WINDOW_NS} ns; full cycle: ${CYCLE_NS} ns"
 case "${SCHEDULER}" in
     fifo) run_case fifo ;;
     rxhopprio) run_case rxhopprio ;;
