@@ -128,8 +128,12 @@ void DynExpTopology::read_params(string topfile) {
     for (int i = 0; i < _nslice; i++) {
       getline(input, line);
       stringstream stream(line);
-      for (int j = 0; j < _no_of_nodes; j++) {
-        stream >> temp;
+      for (int j = 0; j < _nul * _ntor; j++) {
+        if (!(stream >> temp)) {
+          cout << "Invalid topology adjacency row " << i << ": expected "
+               << _nul * _ntor << " uplink entries" << endl;
+          exit(1);
+        }
         _adjacency[i].push_back(temp);
       }
     }
