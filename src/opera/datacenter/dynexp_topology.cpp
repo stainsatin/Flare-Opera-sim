@@ -211,7 +211,8 @@ RlbModule* DynExpTopology::alloc_rlb_module(DynExpTopology* top, int node) {
 Queue* DynExpTopology::alloc_src_queue(DynExpTopology* top, QueueLogger* queueLogger, int node) {
   if(qt==CREDIT) {
     return new NICCreditQueue(speedFromMbps((uint64_t)HOST_NIC), memFromPkt(FEEDER_BUFFER), *eventlist, queueLogger, this, _params["cq_size"], _params["sh_thresh"], 
-    _params["ae_thresh"], _params["te_thresh"]);
+    _params["ae_thresh"], _params["te_thresh"],
+    _params["rx_hop_prio"] != 0);
   }
   if(qt==HBH) {
     return new HbHNICQueue(speedFromMbps((uint64_t)HOST_NIC), memFromPkt(FEEDER_BUFFER), *eventlist, queueLogger, node, this, _params["hbh_D"], _params["hbh_P"]);

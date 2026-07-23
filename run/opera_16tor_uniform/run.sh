@@ -20,6 +20,7 @@ TENTATIVE_QUEUE=2
 OUTPUT_DIR="${SCRIPT_DIR}/results_32MiB_cycle_spread"
 BUILD=auto
 SHAPING_ENABLED=yes
+RX_HOP_PRIO=no
 
 usage() {
     cat <<'EOF'
@@ -39,6 +40,7 @@ Options:
   --probfile FILE           Credit hop-probability file
   --topology FILE           Dynamic Opera topology (default: 55 us superslices)
   --no-shaping              Disable probabilistic admission shaping
+  --rxhopprio               Prioritize current shortest Credit path at receiver NIC
   --output DIR              Result directory
   --build                   Always build the dynamic Opera executable
   --no-build                Require an existing executable
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
         --probfile) PROBFILE="$2"; shift 2 ;;
         --topology) TOPOLOGY="$2"; shift 2 ;;
         --no-shaping) SHAPING_ENABLED=no; shift ;;
+        --rxhopprio) RX_HOP_PRIO=yes; shift ;;
         --output) OUTPUT_DIR="$2"; shift 2 ;;
         --build) BUILD=yes; shift ;;
         --no-build) BUILD=no; shift ;;
@@ -130,6 +133,12 @@ else
     echo "Credit shaping disabled; only queue overflow can reject credits"
 fi
 
+RX_HOP_PRIO_ARGS=()
+if [[ "${RX_HOP_PRIO}" == yes ]]; then
+    RX_HOP_PRIO_ARGS=(-rxhopprio)
+    echo "Receiver current-path Credit priority enabled"
+fi
+
 COMMAND=(
     "${SIMULATOR}"
     -flare
@@ -147,6 +156,7 @@ COMMAND=(
     -jita 4
     -jitb 16
     -fbsens
+    "${RX_HOP_PRIO_ARGS[@]}"
     "${PROB_ARGS[@]}"
     -topfile "${TOPOLOGY}"
     -flowfile "${FLOWFILE}"

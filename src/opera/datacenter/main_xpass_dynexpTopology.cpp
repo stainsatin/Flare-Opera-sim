@@ -124,6 +124,7 @@ int main(int argc, char **argv) {
     double w_init = 0.5; //initial credit pull rate ratio (w.r.t bandwdith)
     bool fb_sens = false; //weight feedback adjustment with prob function
     bool is_flare = false; //false=flare, true=xpass
+    bool rx_hop_prio = false;
     int jit_a = -1; //jittering K value
     int jit_b = -1; //jittering K value
     double fb_w_factor = 2.0; //weight adjustment factor
@@ -171,6 +172,8 @@ int main(int argc, char **argv) {
 	    fb_sens = true;
 	} else if (!strcmp(argv[i],"-flare")){
 	    is_flare = true;
+	} else if (!strcmp(argv[i],"-rxhopprio")){
+	    rx_hop_prio = true;
 	} else if (!strcmp(argv[i],"-probfile")) {
 		string probfile = argv[i+1];
         hops_to_prob = read_probfun(probfile);
@@ -232,7 +235,8 @@ int main(int argc, char **argv) {
 
     map<string,uint64_t> params = 
         {{"cq_size",cred_queuesize},{"sh_thresh",shaping_thresh},
-        {"ae_thresh",aeolus_thresh},{"te_thresh",tent_thresh}};
+        {"ae_thresh",aeolus_thresh},{"te_thresh",tent_thresh},
+        {"rx_hop_prio",rx_hop_prio ? 1U : 0U}};
     DynExpTopology* top = new DynExpTopology(queuesize, &logfile, &eventlist, 
         CREDIT, topfile, params);
     top->set_prob_hops(hops_to_prob);
