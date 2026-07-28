@@ -155,7 +155,11 @@ def adjacency_row(tors, assignment, schedule, superslice, reconfig):
                     row.append(-1)
                     continue
                 slot = previous_slot(schedule_row, superslice)
-            row.append(assignment[rotor][slot][source])
+            destination = assignment[rotor][slot][source]
+            # The factorization uses the identity permutation as its one empty
+            # matching. Encode that hardware-disconnected state as -1 rather
+            # than emitting a ToR self-loop.
+            row.append(-1 if destination == source else destination)
     return row
 
 
@@ -163,22 +167,34 @@ def generate_topology(
     output,
     tors=16,
     radix=8,
+    downlinks=None,
+    uplinks=None,
     epsilon_ps=12_880_000,
     delta_ps=620_000,
     reconfig_ps=1_000_000,
     seed=13,
     trials=5_000,
+    max_hops=None,
 ):
-    if radix % 2:
-        raise ValueError("radix must be even")
-    downlinks = radix // 2
-    uplinks = radix // 2
+    if downlinks is None and uplinks is None:
+        if radix % 2:
+            raise ValueError("radix must be even")
+        downlinks = radix // 2
+        uplinks = radix // 2
+    elif downlinks is None or uplinks is None:
+        raise ValueError("downlinks and uplinks must be specified together")
+    if downlinks <= 0 or uplinks <= 0:
+        raise ValueError("downlinks and uplinks must be positive")
     if tors % uplinks:
-        raise ValueError("the number of ToRs must be divisible by radix/2")
+        raise ValueError("the number of ToRs must be divisible by uplinks")
     if uplinks < 3:
         raise ValueError("at least three rotor uplinks are required")
 
     assignment, schedule, score = choose_assignment(tors, uplinks, seed, trials)
+    if max_hops is not None and score[0] > max_hops:
+        raise RuntimeError(
+            f"best assignment has {score[0]} hops, exceeding --max-hops {max_hops}"
+        )
     lines = [
         f"{tors * downlinks} {downlinks} {uplinks} {tors}",
         f"{3 * tors} {epsilon_ps} {delta_ps} {reconfig_ps}",
@@ -231,14 +247,49 @@ def validate_topology(path):
         for source in range(tors):
             for rotor in range(uplinks):
                 destination = row[source * uplinks + rotor]
+                if destination < -1 or destination >= tors:
+                    raise RuntimeError(
+                        f"slice {slice_index} rotor {rotor} has invalid ToR {destination}"
+                    )
                 if destination < 0:
                     continue
+                if destination == source:
+                    raise RuntimeError(
+                        f"slice {slice_index} rotor {rotor} has a self-loop at ToR {source}"
+                    )
                 if row[destination * uplinks + rotor] != source:
                     raise RuntimeError(
                         f"slice {slice_index} rotor {rotor} is not a symmetric matching"
                     )
 
+    for superslice in range(tors):
+        epsilon = adjacency[3 * superslice]
+        delta = adjacency[3 * superslice + 1]
+        reconfig = adjacency[3 * superslice + 2]
+        if epsilon != delta:
+            raise RuntimeError(
+                f"superslice {superslice} changes topology before reconfiguration"
+            )
+        changed_rotors = []
+        for rotor in range(uplinks):
+            stable_column = [epsilon[source * uplinks + rotor] for source in range(tors)]
+            reconfig_column = [reconfig[source * uplinks + rotor] for source in range(tors)]
+            if stable_column == reconfig_column:
+                continue
+            if any(destination != -1 for destination in reconfig_column):
+                raise RuntimeError(
+                    f"superslice {superslice} rotor {rotor} changes without disconnecting"
+                )
+            changed_rotors.append(rotor)
+        if len(changed_rotors) > 1:
+            raise RuntimeError(
+                f"superslice {superslice} reconfigures multiple rotors: {changed_rotors}"
+            )
+
     cursor = 2 + slices
+    max_route_hops = 0
+    total_route_hops = 0
+    route_count = 0
     for slice_index in range(slices):
         if int(lines[cursor]) != slice_index:
             raise RuntimeError(f"missing route section for slice {slice_index}")
@@ -253,6 +304,9 @@ def validate_topology(path):
                 raise RuntimeError(f"invalid route in slice {slice_index}")
             seen.add((source, destination))
             routes[source, destination] = ports
+            max_route_hops = max(max_route_hops, len(ports))
+            total_route_hops += len(ports)
+            route_count += 1
             current = source
             for port in ports:
                 rotor = port - downlinks
@@ -276,33 +330,50 @@ def validate_topology(path):
                     )
     if cursor != len(lines):
         raise RuntimeError("unexpected trailing topology records")
+    return {
+        "hosts": hosts,
+        "downlinks": downlinks,
+        "uplinks": uplinks,
+        "tors": tors,
+        "slices": slices,
+        "max_hops": max_route_hops,
+        "mean_hops": total_route_hops / route_count,
+    }
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tors", type=int, default=16)
     parser.add_argument("--radix", type=int, default=8)
+    parser.add_argument("--downlinks", type=int)
+    parser.add_argument("--uplinks", type=int)
     parser.add_argument("--epsilon-ps", type=int, default=12_880_000)
     parser.add_argument("--delta-ps", type=int, default=620_000)
     parser.add_argument("--reconfig-ps", type=int, default=1_000_000)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--trials", type=int, default=5_000)
+    parser.add_argument("--max-hops", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if min(args.epsilon_ps, args.delta_ps, args.reconfig_ps) < 0:
         parser.error("slice times must be non-negative")
     if args.trials <= 0:
         parser.error("--trials must be positive")
+    if args.max_hops is not None and args.max_hops <= 0:
+        parser.error("--max-hops must be positive")
 
     max_hops, mean_hops = generate_topology(
         output=args.output,
         tors=args.tors,
         radix=args.radix,
+        downlinks=args.downlinks,
+        uplinks=args.uplinks,
         epsilon_ps=args.epsilon_ps,
         delta_ps=args.delta_ps,
         reconfig_ps=args.reconfig_ps,
         seed=args.seed,
         trials=args.trials,
+        max_hops=args.max_hops,
     )
     print(f"Wrote {args.output}")
     print(f"Maximum ToR hops: {max_hops}")

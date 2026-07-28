@@ -1,20 +1,31 @@
 # Small Opera topologies
 
-The repository contains two timing variants of the same deterministic small
-dynamic Opera topology:
+The repository contains deterministic small dynamic Opera topologies:
 
 ```text
 opera_16tor_4host_15us.txt: 12.88 us epsilon + 0.62 us delta + 1.0 us reconfiguration = 14.5 us
 opera_16tor_4host_55us.txt: 53.38 us epsilon + 0.62 us delta + 1.0 us reconfiguration = 55.0 us
+opera_24tor_4host_55us.txt: 53.38 us epsilon + 0.62 us delta + 1.0 us reconfiguration = 55.0 us
 ```
 
-Both variants have:
+The two 16-ToR variants have:
 
 ```text
 16 ToRs
 4 hosts per ToR (64 hosts total)
 4 rotor uplinks per ToR
 16 superslices / 48 topology slices
+```
+
+The 24-ToR variant has:
+
+```text
+24 ToRs
+4 hosts per ToR (96 hosts total)
+6 rotor uplinks per ToR
+24 superslices / 72 topology slices
+maximum route length: 4 ToR-to-ToR hops
+full topology cycle: 1.32 ms
 ```
 
 The topologies are generated without MATLAB:
@@ -26,10 +37,18 @@ python3 topologies/opera_dynexp_topo_gen/generate_small_opera.py \
 python3 topologies/opera_dynexp_topo_gen/generate_small_opera.py \
   --epsilon-ps 53380000 \
   --output topologies/opera_16tor_4host_55us.txt
+
+python3 topologies/opera_dynexp_topo_gen/generate_small_opera.py \
+  --tors 24 \
+  --downlinks 4 \
+  --uplinks 6 \
+  --epsilon-ps 53380000 \
+  --max-hops 4 \
+  --output topologies/opera_24tor_4host_55us.txt
 ```
 
-The generator constructs a one-factorization, searches deterministic rotor
-assignments whose three-active-rotor reconfiguration graphs are connected,
+The generator constructs a one-factorization, searches deterministic Rotor
+assignments whose non-reconfiguring-Rotor graphs are connected,
 writes one shortest label-switched path for each unordered ToR pair, installs
 its exact reverse for the opposite direction, and validates every emitted
 route against the slice adjacency. Therefore, for every ToR pair and slice:
@@ -37,6 +56,11 @@ route against the slice adjacency. Therefore, for every ToR pair and slice:
 ```text
 route(A, B, slice) = reverse(route(B, A, slice))
 ```
+
+The identity permutation used as the empty one-factorization slot is encoded
+as `-1` (disconnected), never as a ToR self-loop. During each superslice at
+most one additional Rotor is disconnected for reconfiguration, so Rotor
+changes are staggered rather than simultaneous.
 
 The 55 us variant provides substantially more time for a credit and its
 authorized data to traverse an unchanged topology. It reduces cross-superslice
@@ -60,11 +84,12 @@ src/opera/datacenter/htsim_xpass_dynexpTopology \
   -fbw 1.2 \
   -probfile run/pfun_exp2.txt \
   -utiltime 0.1 \
-  -flowfile PATH_TO_64_HOST_FLOW_FILE.htsim \
-  -topfile topologies/opera_16tor_4host_55us.txt
+  -flowfile PATH_TO_FLOW_FILE.htsim \
+  -topfile topologies/opera_24tor_4host_55us.txt
 ```
 
-Host IDs are `0..63`. Hosts `4*t..4*t+3` attach to ToR `t`.
+For the 16-ToR files, Host IDs are `0..63`. For the 24-ToR file, Host IDs are
+`0..95`. In both cases, Hosts `4*t..4*t+3` attach to ToR `t`.
 
 A balanced one-flow-per-host Flare experiment for this topology is available
 under `run/opera_16tor_uniform/`.
