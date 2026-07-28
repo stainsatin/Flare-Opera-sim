@@ -210,6 +210,10 @@ int main(int argc, char **argv) {
         cout << "Both -topfile and -flowfile are required" << endl;
         exit(1);
     }
+    if (rx_hop_prio) {
+        cout << "Receiver hop priority: host-level flow-aware Credit "
+             << "generation (shortest-current-path-first)" << endl;
+    }
 
     eventlist.setEndtime(timeFromSec(simtime));
     Clock c(timeFromSec(5 / 100.), eventlist);

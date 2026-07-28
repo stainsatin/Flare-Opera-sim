@@ -87,6 +87,7 @@ class OperaEightFlowExperimentTest(unittest.TestCase):
         self.assertIn("FLOWS_PER_HOST=8", script)
         self.assertIn("START_SUPERSLICES=2", script)
         self.assertIn("CWND=4", script)
+        self.assertIn("results_8x4MiB_hostflow_stagger2", script)
         self.assertIn("run_case fifo", script)
         self.assertIn("run_case rxhopprio", script)
         self.assertIn("priority_args=(-rxhopprio)", script)

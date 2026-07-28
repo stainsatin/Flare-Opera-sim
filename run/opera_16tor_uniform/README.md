@@ -109,6 +109,7 @@ summary.csv          experiment-wide metrics
 per_flow.csv         FCT, goodput, path hops, and credit outcomes per flow
 per_queue.csv        host and ToR queue metrics per port
 per_tor.csv          per-ToR ingress/egress, FCT, credit drop, and queue metrics
+flow_credit_scheduler.csv  Host scheduler decisions when -rxhopprio is enabled
 ```
 
 Important summary metrics include:

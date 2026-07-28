@@ -9,11 +9,13 @@
 
 #include <list>
 #include <map>
-#include <set>
 #include "config.h"
 #include "eventlist.h"
 #include "network.h"
 #include "loggertypes.h"
+
+class XPassSink;
+class NICCreditQueue;
 
 struct FlowCreditCounters {
     uint32_t sender = 0;
@@ -91,47 +93,50 @@ class CreditQueue : public Queue {
     mem_b _max_cred_queue;
     map<int, uint64_t> _hops_to_creds;
     bool _is_nic;
+};
 
-    struct RxCreditPriority {
-        int hops;
-        uint64_t enqueue_sequence;
-        Packet* packet;
-        int route_slice;
-        int path_index;
-    };
+class RxCreditFlowScheduler : public EventSource {
+ public:
+    RxCreditFlowScheduler(EventList& eventlist, NICCreditQueue* nic);
+    void doNextEvent();
+    void schedule(simtime_picosec when);
 
-    struct RxCreditPriorityLess {
-        bool operator()(const RxCreditPriority& lhs,
-                        const RxCreditPriority& rhs) const {
-            if (lhs.hops != rhs.hops) return lhs.hops < rhs.hops;
-            return lhs.enqueue_sequence < rhs.enqueue_sequence;
-        }
-    };
-
-    void trackRxCredit(Packet* pkt);
-    void eraseRxCredit(Packet* pkt);
-    void rebuildRxCreditPriorities(int slice);
-    void setRxCreditPriority(Packet* pkt, int slice);
-    void dropExpiredRxCredits();
-    Packet* selectRxCredit();
-
-    bool _rx_hop_prio;
-    int _last_priority_slice;
-    uint64_t _next_rx_enqueue_sequence;
-    Packet* _rx_selected_credit;
-    Packet* _rx_credit_in_service;
-    map<Packet*, RxCreditPriority> _rx_credit_priorities;
-    set<RxCreditPriority, RxCreditPriorityLess> _rx_credit_order;
+ private:
+    NICCreditQueue* _nic;
+    bool _event_pending;
+    simtime_picosec _scheduled_time;
 };
 
 class NICCreditQueue : public CreditQueue {
+    friend class RxCreditFlowScheduler;
  public:
     NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize, EventList &eventlist,
 		QueueLogger* logger, DynExpTopology *top,
         mem_b credsize, mem_b shaping_thresh, mem_b aeolus_thresh,
         mem_b tent_thresh, bool rx_hop_prio = false);
+    bool flowCreditSchedulingEnabled() const { return _rx_hop_prio; }
+    void requestCredit(XPassSink* sink);
     void completeService();
 
+ private:
+    struct RxCreditFlowRequest {
+        XPassSink* sink;
+        uint64_t request_sequence;
+        bool pending;
+        int current_hops;
+        int route_slice;
+        int path_index;
+    };
+
+    void scheduleFlowCreditScheduler();
+    void runFlowCreditScheduler();
+    int computeRequestRoute(RxCreditFlowRequest& request, int slice);
+
+    bool _rx_hop_prio;
+    bool _materialized_flow_credit;
+    uint64_t _next_request_sequence;
+    map<uint32_t, RxCreditFlowRequest> _rx_credit_requests;
+    RxCreditFlowScheduler _flow_scheduler;
 };
 
 #endif

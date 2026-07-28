@@ -524,6 +524,13 @@ XPassSink::XPassSink(EventList& eventlist)
   _crt_hops = -1;
   _is_pulling = false;
   _is_recovering = false;
+  _receiver_credit_queue = NULL;
+  _flow_credit_scheduler_enabled = false;
+  _credit_request_pending = false;
+  _scheduled_credit_route_valid = false;
+  _scheduled_credit_slice = -1;
+  _scheduled_credit_path_index = 0;
+  _scheduled_credit_hops = 0;
   _rtt = timeInf;
   _bw_sent_in_quantum.resize(256);
   _tp_sampling_freq = 0;
@@ -580,6 +587,11 @@ uint64_t XPassSink::remaining_in_creds() {
 void XPassSink::connect(XPassSrc& src)
 {
   _src = &src;
+  Queue* receiver_nic = src._top->get_queue_serv_tor(src._flow_dst);
+  _receiver_credit_queue = dynamic_cast<NICCreditQueue*>(receiver_nic);
+  assert(_receiver_credit_queue != NULL);
+  _flow_credit_scheduler_enabled =
+      _receiver_credit_queue->flowCreditSchedulingEnabled();
   
   _cumulative_ack = 0;
   _drops = 0;
@@ -923,8 +935,7 @@ XPassSink::nextCreditWait() {
     return spacing+jitter;
 }
 
-void
-XPassSink::doNextEvent() {
+void XPassSink::updateSliceFeedbackState() {
   int slice = _src->_top->time_to_slice(eventlist().now());
 #ifdef SLICE_RESET
   if(_is_flare && slice != _crt_slice) {
@@ -971,6 +982,31 @@ XPassSink::doNextEvent() {
     }
   }
 #endif
+}
+
+void XPassSink::setScheduledCreditRoute(int slice, int path_index, int hops) {
+  assert(_flow_credit_scheduler_enabled);
+  assert(!_scheduled_credit_route_valid);
+  _scheduled_credit_route_valid = true;
+  _scheduled_credit_slice = slice;
+  _scheduled_credit_path_index = path_index;
+  _scheduled_credit_hops = hops;
+}
+
+void XPassSink::doNextEvent() {
+  updateSliceFeedbackState();
+  if (_flow_credit_scheduler_enabled) {
+    if (!_credit_request_pending) {
+      _credit_request_pending = true;
+      _receiver_credit_queue->requestCredit(this);
+    }
+    return;
+  }
+
+  emitCredit();
+}
+
+XPassPull* XPassSink::emitCredit() {
   XPassPull *p = XPassPull::newpkt(_src->_top, _src->_flow_dst, _src->_flow_src, _src, this);
   p->set_ackno(p->get_xpsink()->cumulative_ack());
   p->set_flow_id(_src->flow_id());
@@ -1020,6 +1056,7 @@ XPassSink::doNextEvent() {
       _bw_sent_creds = 0;
     }
   }
+  return p;
 }
 
 Queue* 
@@ -1027,20 +1064,45 @@ XPassSink::sendToNIC(Packet* pkt) {
   DynExpTopology* top = pkt->get_topology();
   int slice = top->time_to_slice(eventlist().now());
 
+  // The scheduler selects the route before materializing a Credit. The
+  // selection and this call are synchronous, so they must use the same slice.
+  if (_scheduled_credit_route_valid) {
+    assert(pkt->type() == XPCREDIT);
+    assert(_scheduled_credit_slice == slice);
+  }
+
   //set routing info to allow credit shaping at NIC
   if(top->get_firstToR(pkt->get_src()) == top->get_firstToR(pkt->get_dst())) {
     pkt->set_maxhops(0);
     pkt->set_crthop(0);
+    if (_scheduled_credit_route_valid) {
+      assert(_scheduled_credit_hops == 0);
+      pkt->set_slice_sent(_scheduled_credit_slice);
+      pkt->set_path_index(_scheduled_credit_path_index);
+    }
   } else {
-  pkt->set_src_ToR(top->get_firstToR(pkt->get_src()));
-  pkt->set_crthop(0);
-  int npaths = top->get_no_paths(pkt->get_src_ToR(),
-                                 top->get_firstToR(pkt->get_dst()), slice);
-  int path_index = fast_rand() % npaths;
-  pkt->set_maxhops(top->get_no_hops(pkt->get_src_ToR(),
-                                    top->get_firstToR(pkt->get_dst()), slice, path_index));
+    pkt->set_src_ToR(top->get_firstToR(pkt->get_src()));
+    pkt->set_crthop(0);
+    int path_index;
+    int hops;
+    if (_scheduled_credit_route_valid) {
+      path_index = _scheduled_credit_path_index;
+      hops = _scheduled_credit_hops;
+      pkt->set_slice_sent(_scheduled_credit_slice);
+      pkt->set_path_index(path_index);
+    } else {
+      int npaths = top->get_no_paths(pkt->get_src_ToR(),
+                                    top->get_firstToR(pkt->get_dst()), slice);
+      assert(npaths > 0);
+      path_index = fast_rand() % npaths;
+      hops = top->get_no_hops(pkt->get_src_ToR(),
+                              top->get_firstToR(pkt->get_dst()), slice,
+                              path_index);
+    }
+    pkt->set_maxhops(hops);
   }
   pkt->set_tidalhop(max(hopJitter(max(pkt->get_maxhops(),1)),1));
+  _scheduled_credit_route_valid = false;
 
   //get NIC queue for this node
   Queue* nic = top->get_queue_serv_tor(pkt->get_src()); // returns pointer to nic queue

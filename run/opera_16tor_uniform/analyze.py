@@ -44,6 +44,15 @@ FLOW_CREDIT_EXTRA_FIELDS = (
 )
 MSS_BYTES = 1436
 HOST_RATE_GBPS = 100.0
+FLOW_SCHEDULER_FIELDS = (
+    "time",
+    "slice",
+    "selected_flow",
+    "selected_hops",
+    "fifo_first_flow",
+    "fifo_first_hops",
+    "num_pending_flows",
+)
 
 
 def percentile(values, probability):
@@ -109,6 +118,7 @@ def parse_log(path):
     fcts = {}
     utilization = []
     input_load = []
+    flow_credit_scheduler = []
     unfinished_markers = set()
     topology_clip = {"credit": 0, "data": 0, "control": 0, "other": 0}
     topology_wrong_dst = {"credit": 0, "data": 0, "control": 0, "other": 0}
@@ -192,6 +202,13 @@ def parse_log(path):
                 utilization.append((float(fields[2]), float(fields[1])))
             elif fields[0] == "Input" and len(fields) >= 5:
                 input_load.append((float(fields[4]), float(fields[1])))
+            elif fields[0] == "FlowCreditScheduler" and len(fields) >= 8:
+                flow_credit_scheduler.append(
+                    {
+                        name: int(value)
+                        for name, value in zip(FLOW_SCHEDULER_FIELDS, fields[1:8])
+                    }
+                )
             elif fields[0] == "TopologyClipStats" and len(fields) >= 5:
                 topology_clip = dict(
                     zip(topology_clip, (int(value) for value in fields[1:5]))
@@ -223,6 +240,7 @@ def parse_log(path):
         "fcts": fcts,
         "utilization": utilization,
         "input_load": input_load,
+        "flow_credit_scheduler": flow_credit_scheduler,
         "unfinished_markers": unfinished_markers,
         "topology_clip": topology_clip,
         "topology_wrong_dst": topology_wrong_dst,
@@ -576,6 +594,11 @@ def main():
     write_csv(args.results / "per_flow.csv", flow_rows, list(flow_rows[0]))
     write_csv(args.results / "per_queue.csv", parsed["queues"], list(parsed["queues"][0]))
     write_csv(args.results / "per_tor.csv", tor_rows, list(tor_rows[0]))
+    write_csv(
+        args.results / "flow_credit_scheduler.csv",
+        parsed["flow_credit_scheduler"],
+        list(FLOW_SCHEDULER_FIELDS),
+    )
 
     print(
         f"Completed: {summary['completed_flows']}/{summary['offered_flows']} "
@@ -604,6 +627,7 @@ def main():
     print(f"Wrote {args.results / 'per_flow.csv'}")
     print(f"Wrote {args.results / 'per_queue.csv'}")
     print(f"Wrote {args.results / 'per_tor.csv'}")
+    print(f"Wrote {args.results / 'flow_credit_scheduler.csv'}")
 
 
 if __name__ == "__main__":

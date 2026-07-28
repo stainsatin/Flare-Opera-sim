@@ -86,6 +86,8 @@ bash run/opera_108tor_uniform/run.sh \
 The result directory contains `summary.csv`, `per_flow.csv`, `per_queue.csv`,
 and `per_tor.csv` with the same credit, FCT, throughput, fairness, topology
 error, and queue metrics as the 16-ToR experiment. `per_tor.csv` has 108 rows.
+`flow_credit_scheduler.csv` records Host-level Flow selections when
+`-rxhopprio` is enabled.
 
 ## Tests
 

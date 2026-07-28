@@ -44,7 +44,7 @@ Options:
   --probfile FILE           Credit hop-probability file
   --topology FILE           Opera topology (default: dynexp_55us_symm.txt)
   --no-shaping              Disable probabilistic admission shaping
-  --rxhopprio               Prioritize current shortest Credit path at receiver NIC
+  --rxhopprio               Host-level pre-generation shortest-path Flow scheduling
   --output DIR              Result directory
   --build                   Clean-build the dynamic Opera executable
   --no-build                Require an existing executable
@@ -148,7 +148,7 @@ fi
 RX_HOP_PRIO_ARGS=()
 if [[ "${RX_HOP_PRIO}" == yes ]]; then
     RX_HOP_PRIO_ARGS=(-rxhopprio)
-    echo "Receiver current-path Credit priority enabled"
+    echo "Receiver host-level Flow-aware Credit generation enabled"
 fi
 
 COMMAND=(
