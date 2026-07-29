@@ -148,6 +148,12 @@ class RxHopPriorityContractTest(unittest.TestCase):
             self.queue_cpp, "inline int CreditQueue::next_cred"
         ))
 
+    def test_credit_pacing_timer_reselects_after_pushout(self):
+        event = function_body(self.queue_cpp, "void CreditQueue::doNextEvent")
+        self.assertIn("_cred_tx_pending = false", event)
+        self.assertIn("beginService()", event)
+        self.assertNotIn("queuesize_cred(_next_prio) > 0", event)
+
     def test_service_is_weighted_and_work_conserving(self):
         select = function_body(self.queue_cpp, "inline int CreditQueue::next_cred")
         advance = function_body(

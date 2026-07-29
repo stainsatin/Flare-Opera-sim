@@ -655,9 +655,13 @@ void CreditQueue::doNextEvent() {
     // tx event
     completeService();
   } else if (_cred_tx_pending) {
-    // credit queue timer event
-    assert(queuesize_cred(_next_prio) > 0);
-    if (_tx_next == NONE) {
+    // The queue selected when this pacing timer was armed may have become
+    // empty after priority admission pushed out its last waiting Credit.
+    // The timer is only a send opportunity, so select again from current
+    // queue state instead of requiring the stale queue index to stay valid.
+    _cred_tx_pending = false;
+    if (_tx_next == NONE &&
+        !(_enqueued.empty() && queuesize_cred() == 0)) {
       beginService();
     }
   }
