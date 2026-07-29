@@ -6,6 +6,7 @@ ROOT_DIR=$(cd "${SCRIPT_DIR}/../.." && pwd -P)
 SIMULATOR="${ROOT_DIR}/src/opera/datacenter/htsim_xpass_dynexpTopology"
 TOPOLOGY="${ROOT_DIR}/topologies/opera_24tor_4host_55us.txt"
 PROBFILE="${ROOT_DIR}/run/pfun_exp2.txt"
+FLOW_GENERATOR="${SCRIPT_DIR}/generate_flows.py"
 
 SIMTIME=0.02
 UTILTIME=0.1
@@ -43,6 +44,7 @@ Options:
   --aeolus PACKETS          Unscheduled-data allowance (default: 40)
   --tent PACKETS            Tentative Credit threshold (default: 4)
   --probfile FILE           Credit hop-probability file
+  --flow-generator FILE     Compatible workload generator (default: local generator)
   --topology FILE           Compatible 96-host, 24-ToR Opera topology
   --no-shaping              Disable probabilistic Credit admission shaping
   --output DIR              Root directory for selected cases
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --aeolus) AEOLUS_QUEUE="$2"; shift 2 ;;
         --tent) TENTATIVE_QUEUE="$2"; shift 2 ;;
         --probfile) PROBFILE="$2"; shift 2 ;;
+        --flow-generator) FLOW_GENERATOR="$2"; shift 2 ;;
         --topology) TOPOLOGY="$2"; shift 2 ;;
         --no-shaping) SHAPING_ENABLED=no; shift ;;
         --output) OUTPUT_ROOT="$2"; shift 2 ;;
@@ -86,6 +89,10 @@ done
 
 if [[ ! -f "${TOPOLOGY}" ]]; then
     echo "Topology not found: ${TOPOLOGY}" >&2
+    exit 1
+fi
+if [[ ! -f "${FLOW_GENERATOR}" ]]; then
+    echo "Flow generator not found: ${FLOW_GENERATOR}" >&2
     exit 1
 fi
 if ! [[ "${RX_HOP_WEIGHTS}" =~ ^[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$ ]]; then
@@ -133,7 +140,7 @@ fi
 
 mkdir -p "${OUTPUT_ROOT}/workload"
 SHARED_FLOWFILE="${OUTPUT_ROOT}/workload/uniform.htsim"
-python3 "${SCRIPT_DIR}/generate_flows.py" \
+python3 "${FLOW_GENERATOR}" \
     --output "${SHARED_FLOWFILE}" \
     --flow-size-mib "${FLOW_SIZE_MIB}" \
     --start-superslices "${START_SUPERSLICES}" \
@@ -226,7 +233,7 @@ run_case() {
 
 echo "Topology: ${TORS} ToRs, ${HOSTS_PER_TOR} hosts/ToR, ${HOSTS} hosts"
 echo "Superslice: ${SUPERSLICE_NS} ns; active: ${ACTIVE_WINDOW_NS} ns; cycle: ${CYCLE_NS} ns"
-echo "Workload: 4 x ${FLOW_SIZE_MIB} MiB per Host across ${START_SUPERSLICES} superslices; cwnd=${CWND}"
+echo "Workload: ${FLOW_COUNT} flows x ${FLOW_SIZE_MIB} MiB across ${START_SUPERSLICES} superslices; cwnd=${CWND}"
 echo "Receiver NIC Credit modes: WRR=${RX_HOP_WEIGHTS}; priority admission is independently switchable"
 case "${SCHEDULER}" in
     fifo) run_case fifo ;;
