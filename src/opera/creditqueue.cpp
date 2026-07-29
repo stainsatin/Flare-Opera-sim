@@ -158,6 +158,7 @@ CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _next_prio = -1;
   _is_nic = false;
   _rx_hop_prio = false;
+  _rx_prio_admit = false;
   _credit_weights = {4, 2, 1};
   _wrr_priority = 0;
   _wrr_remaining = _credit_weights[0];
@@ -165,6 +166,7 @@ CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _priority_transmissions.assign(CRED_Q_N, 0);
   _priority_drops.assign(CRED_Q_N, 0);
   _priority_pushouts.assign(CRED_Q_N, 0);
+  _priority_queued_bytes.assign(CRED_Q_N, 0);
   _priority_max_queued.assign(CRED_Q_N, 0);
 }
 
@@ -204,15 +206,24 @@ void CreditQueue::updateAvailCredit() {
   _last_cred_t += new_cred * spacing;
 }
 
-// extract priority information from credit packet
-inline int CreditQueue::credit_prio(Packet &pkt) {
+bool CreditQueue::receiverPriorityEnabled() const {
+  return _is_nic && (_rx_hop_prio || _rx_prio_admit);
+}
+
+// Class is independent from the physical queue so admission-only mode can
+// retain one global FIFO while still accounting by hop class.
+inline int CreditQueue::creditClass(Packet &pkt) {
   assert(pkt.type() == XPCREDIT);
-  if (!_is_nic || !_rx_hop_prio) return CRED_Q_N - 1;
+  if (!receiverPriorityEnabled()) return CRED_Q_N - 1;
 
   int hops = max(pkt.get_maxhops(), 0);
   if (hops <= 1) return 0;
   if (hops == 2) return 1;
   return 2;
+}
+
+inline int CreditQueue::creditQueueIndex(Packet &pkt) {
+  return (_is_nic && _rx_hop_prio) ? creditClass(pkt) : CRED_Q_N - 1;
 }
 
 // check for next possible credit to send and drops credits that timed out
@@ -228,12 +239,12 @@ inline int CreditQueue::next_cred() {
         // Stop once the oldest packet in this FIFO is not expired.
         if (eventlist().now() + drainTime(p) <= p->get_tmp_ts()) break;
         // else packet expired, drop and try next
-        assert(_queuesize_cred[i] > 0);
-        _queuesize_cred[i] -= p->size();
+        int credit_class = creditClass(*p);
+        accountCreditDequeue(*p, i, credit_class);
         _hops_to_creds[max((p->get_maxhops() - p->get_crthop()), 1)] -= 1;
         _drop_creds++;
         _drop_timeout++;
-        notePriorityDrop(i, false);
+        notePriorityDrop(credit_class, false);
         recordFlowCreditDrop(*p, &FlowCreditCounters::timeout, _is_nic);
         p->free();
         _enqueued_cred[i].pop_back();
@@ -272,45 +283,84 @@ void CreditQueue::advanceCreditPriority(int served_prio) {
 }
 
 void CreditQueue::notePriorityDrop(int prio, bool pushout) {
-  if (!_is_nic || !_rx_hop_prio) return;
+  if (!receiverPriorityEnabled()) return;
   assert(prio >= 0 && prio < CRED_Q_N);
   _priority_drops[prio]++;
   if (pushout) _priority_pushouts[prio]++;
 }
 
-void CreditQueue::dropQueuedCredit(Packet* pkt, int prio, bool pushout) {
+void CreditQueue::accountCreditEnqueue(Packet &pkt, int queue_index,
+                                       int credit_class) {
+  assert(queue_index >= 0 && queue_index < CRED_Q_N);
+  assert(credit_class >= 0 && credit_class < CRED_Q_N);
+  _queuesize_cred[queue_index] += pkt.size();
+  if (receiverPriorityEnabled())
+    _priority_queued_bytes[credit_class] += pkt.size();
+}
+
+void CreditQueue::accountCreditDequeue(Packet &pkt, int queue_index,
+                                       int credit_class) {
+  assert(queue_index >= 0 && queue_index < CRED_Q_N);
+  assert(credit_class >= 0 && credit_class < CRED_Q_N);
+  assert(_queuesize_cred[queue_index] >= pkt.size());
+  _queuesize_cred[queue_index] -= pkt.size();
+  if (receiverPriorityEnabled()) {
+    assert(_priority_queued_bytes[credit_class] >= pkt.size());
+    _priority_queued_bytes[credit_class] -= pkt.size();
+  }
+}
+
+void CreditQueue::dropQueuedCredit(Packet* pkt, int queue_index,
+                                   int credit_class, bool pushout) {
   assert(pkt != NULL);
-  assert(prio >= 0 && prio < CRED_Q_N);
-  assert(_queuesize_cred[prio] >= pkt->size());
-  _queuesize_cred[prio] -= pkt->size();
+  accountCreditDequeue(*pkt, queue_index, credit_class);
   _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
   _drop_creds++;
   _drop_overflow++;
-  notePriorityDrop(prio, pushout);
+  notePriorityDrop(credit_class, pushout);
   if (pushout) flowCreditCounters(*pkt).pushout++;
   __global_network_tot_cred_waste += max(pkt->get_crthop(), 0);
   recordFlowCreditDrop(*pkt, &FlowCreditCounters::overflow, _is_nic);
   pkt->free();
 }
 
-bool CreditQueue::evictLowerPriorityCredit(int arriving_prio) {
-  assert(_is_nic && _rx_hop_prio);
-  for (int victim_prio = CRED_Q_N - 1;
-       victim_prio > arriving_prio; victim_prio--) {
-    list<Packet*>& queue = _enqueued_cred[victim_prio];
-    if (queue.empty()) continue;
+bool CreditQueue::evictCreditVictim(int victim_class, bool tentative) {
+  for (int queue_index = 0; queue_index < CRED_Q_N; queue_index++) {
+    list<Packet*>& queue = _enqueued_cred[queue_index];
+    for (list<Packet*>::iterator it = queue.begin(); it != queue.end(); ++it) {
+      Packet* candidate = *it;
+      bool in_service = _tx_next == CRED && _next_prio == queue_index &&
+                        candidate == queue.back();
+      if (in_service || creditClass(*candidate) != victim_class ||
+          ((XPassPull*)candidate)->tentative() != tentative)
+        continue;
 
-    bool only_packet_is_in_service =
-        _tx_next == CRED && _next_prio == victim_prio && queue.size() == 1;
-    if (only_packet_is_in_service) continue;
-
-    // Newest low-priority Credit is displaced; an already serialized Credit
-    // at the FIFO back is never preempted.
-    Packet* victim = queue.front();
-    queue.pop_front();
-    dropQueuedCredit(victim, victim_prio, true);
-    return true;
+      queue.erase(it);
+      dropQueuedCredit(candidate, queue_index, victim_class, true);
+      return true;
+    }
   }
+  return false;
+}
+
+bool CreditQueue::evictPriorityCredit(Packet &arriving, int arriving_class) {
+  assert(_is_nic && _rx_prio_admit);
+  bool arriving_tentative = ((XPassPull*)&arriving)->tentative();
+
+  if (arriving_tentative) {
+    for (int victim_class = CRED_Q_N - 1;
+         victim_class > arriving_class; victim_class--)
+      if (evictCreditVictim(victim_class, true)) return true;
+    return false;
+  }
+
+  // Every regular Credit outranks every tentative Credit. Within a type,
+  // displace the worst hop class first and never replace the same class/type.
+  for (int victim_class = CRED_Q_N - 1; victim_class >= 0; victim_class--)
+    if (evictCreditVictim(victim_class, true)) return true;
+  for (int victim_class = CRED_Q_N - 1;
+       victim_class > arriving_class; victim_class--)
+    if (evictCreditVictim(victim_class, false)) return true;
   return false;
 }
 
@@ -324,6 +374,13 @@ mem_b CreditQueue::queuesize_cred(int prio) {
 }
 
 mem_b CreditQueue::queuesize_cred() { return queuesize_cred(CRED_Q_N - 1); }
+
+mem_b CreditQueue::priorityQueuesize(int credit_class) {
+  mem_b size = 0;
+  for (int i = 0; i <= credit_class && i < CRED_Q_N; i++)
+    size += _priority_queued_bytes[i];
+  return size;
+}
 
 static double hops_to_chance(int hops) {
   double from = 0.9;
@@ -350,18 +407,18 @@ static double hops_to_chance_exp(int hops) {
   return chance;
 }
 
-bool CreditQueue::handleCredit(Packet &pkt) {
+bool CreditQueue::handleCredit(Packet &pkt, int credit_class,
+                               int queue_index) {
   assert(pkt.type() == XPCREDIT);
-  int prio = credit_prio(pkt);
   mem_b admission_occupancy =
-      (_is_nic && _rx_hop_prio) ? queuesize_cred()
-                                : queuesize_cred(prio);
+      (_is_nic && _rx_prio_admit) ? priorityQueuesize(credit_class)
+                                  : queuesize_cred();
   if (admission_occupancy > _max_tent_cred &&
       ((XPassPull *)&pkt)->tentative()) {
     // cout << nodename() << " TENTATIVE DROPPED for " << pkt.flow_id() << endl;
     _drop_creds++;
     _drop_tentative++;
-    notePriorityDrop(prio, false);
+    notePriorityDrop(credit_class, false);
     recordFlowCreditDrop(pkt, &FlowCreditCounters::tentative, _is_nic);
     pkt.free();
     return false;
@@ -390,7 +447,7 @@ bool CreditQueue::handleCredit(Packet &pkt) {
               pkt.free();
               _drop_creds++;
               _drop_shaping++;
-              notePriorityDrop(prio, false);
+              notePriorityDrop(credit_class, false);
               return false;
           }
           _shaping_admitted++;
@@ -399,14 +456,14 @@ bool CreditQueue::handleCredit(Packet &pkt) {
   }
   // credit timeout is set to expected max queueing delay if queue was FIFO
   pkt.set_tmp_ts(eventlist().now() + _cred_timeout);
-  _enqueued_cred[prio].push_front(&pkt);
-  _queuesize_cred[prio] += pkt.size();
+  _enqueued_cred[queue_index].push_front(&pkt);
+  accountCreditEnqueue(pkt, queue_index, credit_class);
   _hops_to_creds[max((pkt.get_maxhops() - pkt.get_crthop()), 1)] += 1;
   // measure in term of data packet size
   uint64_t queued_credits =
       (_is_nic && _rx_hop_prio)
           ? queuesize_cred() / pkt.size()
-          : _enqueued_cred[prio].size();
+          : _enqueued_cred[queue_index].size();
   pkt.inc_queueing(queued_credits * 1500);
   return true;
 }
@@ -421,9 +478,10 @@ void CreditQueue::receivePacket(Packet &pkt) {
   << eventlist().now() << endl;
   */
   if (pkt.type() == XPCREDIT) {
-    int prio = credit_prio(pkt);
+    int credit_class = creditClass(pkt);
+    int queue_index = creditQueueIndex(pkt);
     _tot_creds++;
-    if (_is_nic && _rx_hop_prio) _priority_arrivals[prio]++;
+    if (receiverPriorityEnabled()) _priority_arrivals[credit_class]++;
     FlowCreditCounters& counters = flowCreditCounters(pkt);
     counters.queue_arrivals++;
     if (_is_nic) {
@@ -436,8 +494,9 @@ void CreditQueue::receivePacket(Packet &pkt) {
       creditHopCounters(pkt).generated++;
     }
     // cout << "xpcredit\n";
-    bool priority_nic = _is_nic && _rx_hop_prio;
-    if (!priority_nic && queuesize_cred() + pkt.size() > _maxsize_cred) {
+    bool priority_admission = _is_nic && _rx_prio_admit;
+    if (!priority_admission &&
+        queuesize_cred() + pkt.size() > _maxsize_cred) {
       // if the credit doesn't fit in the queue, drop it
       // cout << nodename() << " CREDIT DROPPED (overflow) for " <<
       // pkt.flow_id() << endl;
@@ -446,24 +505,26 @@ void CreditQueue::receivePacket(Packet &pkt) {
       pkt.free();
       _drop_creds++;
       _drop_overflow++;
-      notePriorityDrop(prio, false);
+      notePriorityDrop(credit_class, false);
       return;
     }
-    if (!handleCredit(pkt)) return;
-    if (priority_nic) {
+    if (!handleCredit(pkt, credit_class, queue_index)) return;
+    if (priority_admission) {
       while (queuesize_cred() > _maxsize_cred &&
-             evictLowerPriorityCredit(prio)) {
+             evictPriorityCredit(pkt, credit_class)) {
       }
       if (queuesize_cred() > _maxsize_cred) {
-        assert(!_enqueued_cred[prio].empty());
-        assert(_enqueued_cred[prio].front() == &pkt);
-        _enqueued_cred[prio].pop_front();
-        dropQueuedCredit(&pkt, prio, false);
+        assert(!_enqueued_cred[queue_index].empty());
+        assert(_enqueued_cred[queue_index].front() == &pkt);
+        _enqueued_cred[queue_index].pop_front();
+        dropQueuedCredit(&pkt, queue_index, credit_class, false);
         return;
       }
-      _priority_max_queued[prio] =
-          max(_priority_max_queued[prio], _queuesize_cred[prio]);
     }
+    if (receiverPriorityEnabled())
+      _priority_max_queued[credit_class] =
+          max(_priority_max_queued[credit_class],
+              _priority_queued_bytes[credit_class]);
     _max_cred_queue = max(_max_cred_queue, queuesize_cred());
   } else {
     // cout << "xpdata\n";
@@ -560,9 +621,11 @@ void CreditQueue::completeService() {
     pkt = _enqueued_cred[prio].back();
     _enqueued_cred[prio].pop_back();
     updatePktOut(pkt->flow_id());
-    _queuesize_cred[prio] -= pkt->size();
+    int credit_class = creditClass(*pkt);
+    accountCreditDequeue(*pkt, prio, credit_class);
     _tx_creds++;
-    if (_is_nic && _rx_hop_prio) _priority_transmissions[prio]++;
+    if (receiverPriorityEnabled())
+      _priority_transmissions[credit_class]++;
     advanceCreditPriority(prio);
     FlowCreditCounters& counters = flowCreditCounters(*pkt);
     counters.queue_transmissions++;
@@ -614,14 +677,15 @@ void CreditQueue::reportCreditStats(const string& scope, int id, int port) {
 }
 
 void CreditQueue::reportPriorityStats(const string& scope, int id, int port) {
-  if (!_is_nic || !_rx_hop_prio) return;
+  if (!receiverPriorityEnabled()) return;
   static const char* names[CRED_Q_N] = {"high", "medium", "low"};
   for (int prio = 0; prio < CRED_Q_N; prio++) {
     cout << "CreditPriorityStats " << scope << " " << id << " " << port
-         << " " << names[prio] << " " << _credit_weights[prio] << " "
+         << " " << names[prio] << " "
+         << (_rx_hop_prio ? _credit_weights[prio] : 0) << " "
          << _priority_arrivals[prio] << " "
          << _priority_transmissions[prio] << " "
-         << _queuesize_cred[prio] / 64 << " "
+         << _priority_queued_bytes[prio] / 64 << " "
          << _priority_max_queued[prio] / 64 << " "
          << _priority_drops[prio] << " " << _priority_pushouts[prio]
          << endl;
@@ -711,6 +775,7 @@ NICCreditQueue::NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize,
                                DynExpTopology *top, mem_b credsize,
                                mem_b shaping_thresh, mem_b aeolus_thresh,
                                mem_b tent_thresh, bool rx_hop_prio,
+                               bool rx_prio_admit,
                                uint32_t high_weight,
                                uint32_t medium_weight,
                                uint32_t low_weight)
@@ -719,6 +784,7 @@ NICCreditQueue::NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   assert(high_weight > 0 && medium_weight > 0 && low_weight > 0);
   _is_nic = true;
   _rx_hop_prio = rx_hop_prio;
+  _rx_prio_admit = rx_prio_admit;
   _credit_weights = {high_weight, medium_weight, low_weight};
   _wrr_priority = 0;
   _wrr_remaining = _credit_weights[0];
@@ -736,9 +802,11 @@ void NICCreditQueue::completeService() {
     pkt = _enqueued_cred[prio].back();
     _enqueued_cred[prio].pop_back();
     updatePktOut(pkt->flow_id());
-    _queuesize_cred[prio] -= pkt->size();
+    int credit_class = creditClass(*pkt);
+    accountCreditDequeue(*pkt, prio, credit_class);
     _tx_creds++;
-    if (_rx_hop_prio) _priority_transmissions[prio]++;
+    if (receiverPriorityEnabled())
+      _priority_transmissions[credit_class]++;
     advanceCreditPriority(prio);
     flowCreditCounters(*pkt).queue_transmissions++;
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
@@ -798,7 +866,7 @@ void NICCreditQueue::completeService() {
     int path_index;
     // A prioritized Credit carries the arrival-time route used to classify
     // it. Reuse that route only if NIC waiting did not cross a slice.
-    if (_rx_hop_prio && pkt->type() == XPCREDIT &&
+    if (receiverPriorityEnabled() && pkt->type() == XPCREDIT &&
         pkt->get_slice_sent() == slice) {
       path_index = pkt->get_path_index();
       assert(path_index >= 0 && path_index < npaths);

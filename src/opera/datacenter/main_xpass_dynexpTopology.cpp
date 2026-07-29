@@ -129,6 +129,7 @@ int main(int argc, char **argv) {
     bool fb_sens = false; //weight feedback adjustment with prob function
     bool is_flare = false; //false=flare, true=xpass
     bool rx_hop_prio = false;
+    bool rx_prio_admit = false;
     uint32_t rx_hop_weight_high = 4;
     uint32_t rx_hop_weight_medium = 2;
     uint32_t rx_hop_weight_low = 1;
@@ -182,6 +183,8 @@ int main(int argc, char **argv) {
 	    is_flare = true;
 	} else if (!strcmp(argv[i],"-rxhopprio")){
 	    rx_hop_prio = true;
+	} else if (!strcmp(argv[i],"-rxprioadmit")){
+	    rx_prio_admit = true;
 	} else if (!strcmp(argv[i],"-rxhopweights")){
         if (i + 3 >= argc) {
             cout << "-rxhopweights requires three values: high medium low"
@@ -241,10 +244,15 @@ int main(int argc, char **argv) {
         exit(1);
     }
     if (rx_hop_prio) {
-        cout << "Receiver hop priority: shared NIC Credit buffer with "
-             << "arrival-time hop classes and WRR weights "
+        cout << "Receiver hop-priority service: shared NIC Credit buffer "
+             << "with WRR weights "
              << rx_hop_weight_high << ":" << rx_hop_weight_medium << ":"
              << rx_hop_weight_low << endl;
+    }
+    if (rx_prio_admit) {
+        cout << "Receiver hop-priority admission: class-cumulative "
+             << "tentative/shaping occupancy with regular/tentative-aware "
+             << "push-out" << endl;
     }
 
     eventlist.setEndtime(timeFromSec(simtime));
@@ -273,6 +281,7 @@ int main(int argc, char **argv) {
         {{"cq_size",cred_queuesize},{"sh_thresh",shaping_thresh},
         {"ae_thresh",aeolus_thresh},{"te_thresh",tent_thresh},
         {"rx_hop_prio",rx_hop_prio ? 1U : 0U},
+        {"rx_prio_admit",rx_prio_admit ? 1U : 0U},
         {"rx_hop_weight_high",rx_hop_weight_high},
         {"rx_hop_weight_medium",rx_hop_weight_medium},
         {"rx_hop_weight_low",rx_hop_weight_low}};

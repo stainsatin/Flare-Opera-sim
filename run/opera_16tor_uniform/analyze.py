@@ -516,11 +516,24 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         row for row in scheduler_rows if row.get("continued_quantum", "") != ""
     ]
     priority_rows = parsed.get("priority_queues", [])
+    credit_hop_stats = parsed.get("credit_hop_stats", [])
 
     def priority_sum(priority, field):
         return sum(
             row[field] for row in priority_rows if row["priority"] == priority
         )
+
+    def credit_type_sum(credit_type, field):
+        return sum(
+            row[field]
+            for row in credit_hop_stats
+            if row["credit_type"] == credit_type
+        )
+
+    regular_admitted = credit_type_sum("regular", "admitted")
+    tentative_admitted = credit_type_sum("tentative", "admitted")
+    regular_delivered = credit_type_sum("regular", "delivered")
+    tentative_delivered = credit_type_sum("tentative", "delivered")
 
     tor_active_goodputs = []
     for tor in sorted({row["source_tor"] for row in flow_rows}):
@@ -671,9 +684,19 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         ),
         "generated_credits": generated,
         "admitted_credits": admitted,
+        "regular_admitted_credits": regular_admitted,
+        "tentative_admitted_credits": tentative_admitted,
+        "regular_admitted_share": (
+            regular_admitted / admitted if admitted else 0.0
+        ),
         "credits_left_endpoints": host_transmitted,
         "admitted_counter_difference": admitted - host_transmitted,
         "delivered_credits": delivered,
+        "regular_delivered_credits": regular_delivered,
+        "tentative_delivered_credits": tentative_delivered,
+        "regular_delivered_share": (
+            regular_delivered / delivered if delivered else 0.0
+        ),
         "credit_drops": dropped,
         "credit_drop_ratio": dropped / generated if generated else 0.0,
         "residual_or_unaccounted_credits": generated - delivered - dropped,
@@ -726,11 +749,11 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
             sum(row["waste_hops"] for row in flow_rows) / generated if generated else 0.0
         ),
         "total_credit_network_hops": sum(
-            row["delivered_path_hops_sum"] + row["waste_hops"]
+            row["delivered_actual_hops_sum"] + row["waste_hops"]
             for row in flow_rows
         ),
         "total_credit_network_link_bytes": sum(
-            row["delivered_path_hops_sum"] + row["waste_hops"]
+            row["delivered_actual_hops_sum"] + row["waste_hops"]
             for row in flow_rows
         )
         * 64,

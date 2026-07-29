@@ -12,7 +12,7 @@ UTILTIME=0.1
 FLOW_SIZE_MIB=2
 START_SUPERSLICES=8
 BASE_START_NS=1000
-SCHEDULER=all
+SCHEDULER=both
 RX_HOP_WEIGHTS=8:2:1
 CWND=4
 DATA_QUEUE=600
@@ -20,7 +20,7 @@ CREDIT_QUEUE=60
 SHAPING_QUEUE=30
 AEOLUS_QUEUE=40
 TENTATIVE_QUEUE=4
-OUTPUT_ROOT="${SCRIPT_DIR}/results_4x2MiB_stagger8_w821_admission"
+OUTPUT_ROOT="${SCRIPT_DIR}/results_4x2MiB_stagger8_w821"
 BUILD=auto
 SHAPING_ENABLED=yes
 
@@ -29,7 +29,7 @@ usage() {
 Usage: bash run/opera_24tor_4flow_2MiB/run.sh [options]
 
 Options:
-  --scheduler MODE          fifo, wrr, admission, combined, or all (default: all)
+  --scheduler MODE          fifo, rxhopprio, or both (default: both)
   --rxhop-weights H:M:L     NIC Credit WRR weights (default: 8:2:1)
   --flow-size-mib MIB       Size of every flow (default: 2)
   --start-superslices N     Release over 4, 8, or 16 slices (default: 8)
@@ -45,7 +45,7 @@ Options:
   --probfile FILE           Credit hop-probability file
   --topology FILE           Compatible 96-host, 24-ToR Opera topology
   --no-shaping              Disable probabilistic Credit admission shaping
-  --output DIR              Root directory for selected cases
+  --output DIR              Root directory for both cases
   --build                   Clean-build the dynamic Opera executable
   --no-build                Require an existing executable
   -h, --help                Show this help
@@ -56,8 +56,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --scheduler)
             case "$2" in
-                fifo|wrr|admission|combined|all) SCHEDULER="$2" ;;
-                *) echo "--scheduler must be fifo, wrr, admission, combined, or all" >&2; exit 2 ;;
+                fifo|rxhopprio|both) SCHEDULER="$2" ;;
+                *) echo "--scheduler must be fifo, rxhopprio, or both" >&2; exit 2 ;;
             esac
             shift 2
             ;;
@@ -159,22 +159,10 @@ run_case() {
     local case_name="$1"
     local case_dir="${OUTPUT_ROOT}/${case_name}"
     local priority_args=()
-    case "${case_name}" in
-        fifo) ;;
-        wrr)
-            priority_args=(-rxhopprio -rxhopweights \
-                "${RX_HOP_WEIGHT_HIGH}" "${RX_HOP_WEIGHT_MEDIUM}" "${RX_HOP_WEIGHT_LOW}")
-            ;;
-        admission)
-            priority_args=(-rxprioadmit)
-            ;;
-        combined)
-            priority_args=(-rxhopprio -rxhopweights \
-                "${RX_HOP_WEIGHT_HIGH}" "${RX_HOP_WEIGHT_MEDIUM}" "${RX_HOP_WEIGHT_LOW}" \
-                -rxprioadmit)
-            ;;
-        *) echo "Unknown case: ${case_name}" >&2; return 2 ;;
-    esac
+    if [[ "${case_name}" == rxhopprio ]]; then
+        priority_args=(-rxhopprio -rxhopweights \
+            "${RX_HOP_WEIGHT_HIGH}" "${RX_HOP_WEIGHT_MEDIUM}" "${RX_HOP_WEIGHT_LOW}")
+    fi
 
     mkdir -p "${case_dir}/traffic"
     cp "${SHARED_FLOWFILE}" "${case_dir}/traffic/uniform.htsim"
@@ -227,22 +215,16 @@ run_case() {
 echo "Topology: ${TORS} ToRs, ${HOSTS_PER_TOR} hosts/ToR, ${HOSTS} hosts"
 echo "Superslice: ${SUPERSLICE_NS} ns; active: ${ACTIVE_WINDOW_NS} ns; cycle: ${CYCLE_NS} ns"
 echo "Workload: 4 x ${FLOW_SIZE_MIB} MiB per Host across ${START_SUPERSLICES} superslices; cwnd=${CWND}"
-echo "Receiver NIC Credit modes: WRR=${RX_HOP_WEIGHTS}; priority admission is independently switchable"
+echo "Receiver NIC Credit priority: shared credq, WRR weights=${RX_HOP_WEIGHTS}"
 case "${SCHEDULER}" in
     fifo) run_case fifo ;;
-    wrr) run_case wrr ;;
-    admission) run_case admission ;;
-    combined) run_case combined ;;
-    all)
+    rxhopprio) run_case rxhopprio ;;
+    both)
         run_case fifo
-        run_case wrr
-        run_case admission
-        run_case combined
+        run_case rxhopprio
         python3 "${SCRIPT_DIR}/compare.py" \
             --fifo "${OUTPUT_ROOT}/fifo/summary.csv" \
-            --wrr "${OUTPUT_ROOT}/wrr/summary.csv" \
-            --admission "${OUTPUT_ROOT}/admission/summary.csv" \
-            --combined "${OUTPUT_ROOT}/combined/summary.csv" \
+            --rxhopprio "${OUTPUT_ROOT}/rxhopprio/summary.csv" \
             --output "${OUTPUT_ROOT}/comparison.csv"
         ;;
 esac

@@ -14,11 +14,6 @@ SPEC = importlib.util.spec_from_file_location(
 )
 FLOWS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FLOWS)
-COMPARE_SPEC = importlib.util.spec_from_file_location(
-    "opera_24tor_light_compare", HERE / "compare.py"
-)
-COMPARE = importlib.util.module_from_spec(COMPARE_SPEC)
-COMPARE_SPEC.loader.exec_module(COMPARE)
 
 
 class OperaTwentyFourTorLighterExperimentTest(unittest.TestCase):
@@ -101,50 +96,21 @@ class OperaTwentyFourTorLighterExperimentTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             FLOWS.build_flows(base_start_ns=54_000)
 
-    def test_run_script_uses_four_independent_priority_modes(self):
+    def test_run_script_uses_lighter_defaults_and_821_weights(self):
         script = (HERE / "run.sh").read_text(encoding="ascii")
         self.assertIn("SIMTIME=0.02", script)
         self.assertIn("FLOW_SIZE_MIB=2", script)
         self.assertIn("START_SUPERSLICES=8", script)
         self.assertIn("RX_HOP_WEIGHTS=8:2:1", script)
         self.assertIn("CWND=4", script)
-        self.assertIn("results_4x2MiB_stagger8_w821_admission", script)
+        self.assertIn("results_4x2MiB_stagger8_w821", script)
         self.assertIn("run_case fifo", script)
-        self.assertIn("run_case wrr", script)
-        self.assertIn("run_case admission", script)
-        self.assertIn("run_case combined", script)
+        self.assertIn("run_case rxhopprio", script)
         self.assertIn("priority_args=(-rxhopprio -rxhopweights", script)
-        self.assertIn("priority_args=(-rxprioadmit)", script)
-        self.assertIn("-rxprioadmit)", script)
-        self.assertIn('--scheduler MODE          fifo, wrr, admission, combined, or all', script)
         self.assertIn("opera_24tor_4host_55us.txt", script)
         self.assertTrue(
             (ROOT / "topologies" / "opera_24tor_4host_55us.txt").is_file()
         )
-
-    def test_four_way_comparison_tracks_acceptance_metrics(self):
-        comparer = (HERE / "compare.py").read_text(encoding="ascii")
-        self.assertIn('CASES = ("fifo", "wrr", "admission", "combined")', comparer)
-        for metric in (
-            "mean_admitted_credit_path_hops",
-            "mean_delivered_credit_path_hops",
-            "mean_delivered_actual_credit_hops",
-            "regular_delivered_share",
-            "tor_queue_credit_drops",
-            "total_credit_network_link_bytes",
-            "mean_fct_ms",
-        ):
-            self.assertIn(metric, comparer)
-
-        summaries = {
-            "fifo": {"mean_fct_ms": "4.0"},
-            "wrr": {"mean_fct_ms": "3.5"},
-            "admission": {"mean_fct_ms": "3.0"},
-            "combined": {"mean_fct_ms": "2.5"},
-        }
-        rows = {row["metric"]: row for row in COMPARE.compare_summaries(summaries)}
-        self.assertEqual(rows["mean_fct_ms"]["best"], "combined")
-        self.assertEqual(rows["mean_fct_ms"]["admission_delta_vs_fifo"], -1.0)
 
 
 if __name__ == "__main__":

@@ -41,7 +41,9 @@ class RxHopPriorityContractTest(unittest.TestCase):
 
     def test_command_line_mode_is_opt_in_and_weights_reach_only_host_nics(self):
         self.assertIn("bool rx_hop_prio = false;", self.main_cpp)
+        self.assertIn("bool rx_prio_admit = false;", self.main_cpp)
         self.assertIn('!strcmp(argv[i],"-rxhopprio")', self.main_cpp)
+        self.assertIn('!strcmp(argv[i],"-rxprioadmit")', self.main_cpp)
         self.assertIn('!strcmp(argv[i],"-rxhopweights")', self.main_cpp)
         self.assertIn("uint32_t rx_hop_weight_high = 4;", self.main_cpp)
         self.assertIn("uint32_t rx_hop_weight_medium = 2;", self.main_cpp)
@@ -56,9 +58,11 @@ class RxHopPriorityContractTest(unittest.TestCase):
             "Queue* DynExpTopology::alloc_queue(QueueLogger* queueLogger, uint64_t",
         )
         self.assertIn('_params.find("rx_hop_prio")', alloc_src)
+        self.assertIn('_params.find("rx_prio_admit")', alloc_src)
         self.assertIn('rx_hop_weight_high', alloc_src)
         self.assertIn("new NICCreditQueue", alloc_src)
         self.assertNotIn("rx_hop_prio", alloc_tor)
+        self.assertNotIn("rx_prio_admit", alloc_tor)
 
     def test_original_per_flow_credit_generation_is_restored(self):
         event = function_body(self.xpass_cpp, "void XPassSink::doNextEvent")
@@ -90,7 +94,7 @@ class RxHopPriorityContractTest(unittest.TestCase):
             self.assertNotIn(removed, self.queue_h + self.queue_cpp + self.xpass_h)
 
     def test_three_hop_classes_share_one_capacity(self):
-        classify = function_body(self.queue_cpp, "inline int CreditQueue::credit_prio")
+        classify = function_body(self.queue_cpp, "inline int CreditQueue::creditClass")
         receive = function_body(self.queue_cpp, "void CreditQueue::receivePacket")
         self.assertIn("#define CRED_Q_N 3", self.queue_cpp)
         self.assertIn("pkt.get_maxhops()", classify)
@@ -106,23 +110,43 @@ class RxHopPriorityContractTest(unittest.TestCase):
         complete = function_body(
             self.queue_cpp, "void NICCreditQueue::completeService"
         )
-        self.assertIn("_enqueued_cred[prio].push_front(&pkt)", admission)
+        self.assertIn("_enqueued_cred[queue_index].push_front(&pkt)", admission)
         self.assertIn("pkt = _enqueued_cred[prio].back()", complete)
         self.assertIn("_enqueued_cred[prio].pop_back()", complete)
 
-    def test_full_queue_pushes_out_only_lower_priority_waiters(self):
+    def test_admission_pushout_is_type_and_hop_aware(self):
         evict = function_body(
-            self.queue_cpp, "bool CreditQueue::evictLowerPriorityCredit"
+            self.queue_cpp, "bool CreditQueue::evictPriorityCredit"
+        )
+        find_victim = function_body(
+            self.queue_cpp, "bool CreditQueue::evictCreditVictim"
         )
         receive = function_body(self.queue_cpp, "void CreditQueue::receivePacket")
-        self.assertIn("victim_prio > arriving_prio", evict)
-        self.assertIn("victim_prio = CRED_Q_N - 1", evict)
-        self.assertIn("queue.front()", evict)
-        self.assertIn("queue.pop_front()", evict)
-        self.assertIn("only_packet_is_in_service", evict)
-        self.assertIn("_tx_next == CRED", evict)
-        self.assertIn("evictLowerPriorityCredit(prio)", receive)
-        self.assertIn("dropQueuedCredit(&pkt, prio, false)", receive)
+        self.assertIn("arriving_tentative", evict)
+        self.assertIn("evictCreditVictim(victim_class, true)", evict)
+        self.assertIn("evictCreditVictim(victim_class, false)", evict)
+        self.assertIn("victim_class > arriving_class", evict)
+        self.assertIn("candidate == queue.back()", find_victim)
+        self.assertIn("queue.erase(it)", find_victim)
+        self.assertIn("evictPriorityCredit(pkt, credit_class)", receive)
+        self.assertIn(
+            "dropQueuedCredit(&pkt, queue_index, credit_class, false)", receive
+        )
+
+    def test_service_and_admission_flags_are_independent(self):
+        queue_index = function_body(
+            self.queue_cpp, "inline int CreditQueue::creditQueueIndex"
+        )
+        admission = function_body(self.queue_cpp, "bool CreditQueue::handleCredit")
+        receive = function_body(self.queue_cpp, "void CreditQueue::receivePacket")
+        self.assertIn("_rx_hop_prio", queue_index)
+        self.assertNotIn("_rx_prio_admit", queue_index)
+        self.assertIn("_rx_prio_admit", admission)
+        self.assertIn("priorityQueuesize(credit_class)", admission)
+        self.assertIn("bool priority_admission = _is_nic && _rx_prio_admit", receive)
+        self.assertNotIn("evictPriorityCredit", function_body(
+            self.queue_cpp, "inline int CreditQueue::next_cred"
+        ))
 
     def test_service_is_weighted_and_work_conserving(self):
         select = function_body(self.queue_cpp, "inline int CreditQueue::next_cred")
@@ -152,7 +176,7 @@ class RxHopPriorityContractTest(unittest.TestCase):
             "set_maxhops(hops)",
         ):
             self.assertIn(fragment, send)
-        self.assertIn("int prio = credit_prio(pkt)", receive)
+        self.assertIn("int credit_class = creditClass(pkt)", receive)
         self.assertNotIn("time_to_slice", select)
         self.assertIn("pkt->get_slice_sent() == slice", complete)
         self.assertIn("path_index = pkt->get_path_index()", complete)
@@ -160,6 +184,7 @@ class RxHopPriorityContractTest(unittest.TestCase):
 
     def test_priority_and_pushout_statistics_are_exported(self):
         self.assertIn("CreditPriorityStats", self.queue_cpp)
+        self.assertIn("_priority_queued_bytes", self.queue_h)
         self.assertIn("pushout", self.queue_h)
         self.assertIn("priority_queues", self.analyzer)
         self.assertIn('"per_priority_queue.csv"', self.analyzer)

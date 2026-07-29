@@ -72,15 +72,22 @@ class CreditQueue : public Queue {
     int _next_prio;
     void updateAvailCredit();
     void scheduleCredit();
-    bool handleCredit(Packet &pkt);
+    bool handleCredit(Packet &pkt, int credit_class, int queue_index);
     simtime_picosec cred_tx_delta();
     bool credit_ready();
-    int credit_prio(Packet &pkt);
+    bool receiverPriorityEnabled() const;
+    int creditClass(Packet &pkt);
+    int creditQueueIndex(Packet &pkt);
     int next_cred();
     void advanceCreditPriority(int served_prio);
-    bool evictLowerPriorityCredit(int arriving_prio);
-    void dropQueuedCredit(Packet* pkt, int prio, bool pushout);
-    void notePriorityDrop(int prio, bool pushout);
+    bool evictPriorityCredit(Packet &arriving, int arriving_class);
+    bool evictCreditVictim(int victim_class, bool tentative);
+    void accountCreditEnqueue(Packet &pkt, int queue_index, int credit_class);
+    void accountCreditDequeue(Packet &pkt, int queue_index, int credit_class);
+    void dropQueuedCredit(Packet* pkt, int queue_index, int credit_class,
+                          bool pushout);
+    void notePriorityDrop(int credit_class, bool pushout);
+    mem_b priorityQueuesize(int credit_class);
     mem_b queuesize_cred(int prio); //queue within a certain prio
     mem_b queuesize_cred(); //full queue size
     mem_b _maxsize_cred;
@@ -109,6 +116,7 @@ class CreditQueue : public Queue {
     map<int, uint64_t> _hops_to_creds;
     bool _is_nic;
     bool _rx_hop_prio;
+    bool _rx_prio_admit;
     vector<uint32_t> _credit_weights;
     int _wrr_priority;
     uint32_t _wrr_remaining;
@@ -116,6 +124,7 @@ class CreditQueue : public Queue {
     vector<uint64_t> _priority_transmissions;
     vector<uint64_t> _priority_drops;
     vector<uint64_t> _priority_pushouts;
+    vector<mem_b> _priority_queued_bytes;
     vector<mem_b> _priority_max_queued;
 };
 
@@ -125,6 +134,7 @@ class NICCreditQueue : public CreditQueue {
 		QueueLogger* logger, DynExpTopology *top,
         mem_b credsize, mem_b shaping_thresh, mem_b aeolus_thresh,
         mem_b tent_thresh, bool rx_hop_prio = false,
+        bool rx_prio_admit = false,
         uint32_t high_weight = 4, uint32_t medium_weight = 2,
         uint32_t low_weight = 1);
     void completeService();

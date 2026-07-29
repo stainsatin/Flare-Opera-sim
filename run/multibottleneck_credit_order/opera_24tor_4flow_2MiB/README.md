@@ -1,23 +1,8 @@
 # 24-ToR lighter receiver-NIC priority experiment
 
-This experiment keeps `topologies/opera_24tor_4host_55us.txt` and separates
-receiver-NIC Credit service from priority-aware admission. The default run
-uses one shared trace for four cases:
-
-| Case | Service | Admission |
-|---|---|---|
-| `fifo` | Original FIFO | Original total-occupancy checks, no push-out |
-| `wrr` | Hop-class WRR `8:2:1` | Original checks, no push-out |
-| `admission` | Original FIFO | Class-cumulative checks and priority push-out |
-| `combined` | Hop-class WRR `8:2:1` | Class-cumulative checks and priority push-out |
-
+This experiment keeps `topologies/opera_24tor_4host_55us.txt` and compares
+FIFO against the shared receiver-NIC Credit queues with WRR weights `8:2:1`.
 It is intentionally lighter than the earlier 8-flow x 4-MiB workload.
-
-Admission uses one shared `credq`: High sees High occupancy, Medium sees
-High+Medium, and Low sees the full queue. A tentative arrival can only replace
-a lower-hop tentative Credit. A regular arrival first replaces the worst-hop
-tentative Credit, then a lower-hop-priority regular Credit. The Credit already
-being serialized is protected, and admission-only service remains global FIFO.
 
 ## Default workload
 
@@ -44,7 +29,7 @@ remain unchanged for a controlled comparison.
 
 ## Run
 
-Build and run all four cases:
+Build and run FIFO plus `8:2:1` priority:
 
 ```bash
 bash run/opera_24tor_4flow_2MiB/run.sh --build
@@ -55,10 +40,10 @@ Reuse an existing executable:
 ```bash
 bash run/opera_24tor_4flow_2MiB/run.sh \
   --no-build \
-  --scheduler all \
+  --scheduler both \
   --rxhop-weights 8:2:1 \
   --simtime 0.02 \
-  --output run/opera_24tor_4flow_2MiB/results_4x2MiB_stagger8_w821_admission
+  --output run/opera_24tor_4flow_2MiB/results_4x2MiB_stagger8_w821
 ```
 
 For a still lighter release rate without changing bytes or the traffic matrix:
@@ -66,22 +51,14 @@ For a still lighter release rate without changing bytes or the traffic matrix:
 ```bash
 bash run/opera_24tor_4flow_2MiB/run.sh \
   --no-build \
-  --scheduler all \
+  --scheduler both \
   --start-superslices 16 \
-  --output run/opera_24tor_4flow_2MiB/results_4x2MiB_stagger16_w821_admission
+  --output run/opera_24tor_4flow_2MiB/results_4x2MiB_stagger16_w821
 ```
 
 Each case produces `summary.csv`, `per_flow.csv`, `per_queue.csv`,
 `per_priority_queue.csv`, `per_tor.csv`, and `per_credit_hop.csv`. The output
 root also contains the shared workload and `comparison.csv`.
-
-The main acceptance columns in `summary.csv` are
-`mean_admitted_credit_path_hops`, `mean_delivered_credit_path_hops`,
-`mean_delivered_actual_credit_hops`,
-`regular_admitted_share`, `regular_delivered_share`,
-`tor_queue_credit_drops`, `total_credit_network_link_bytes`, and the FCT
-columns. `per_credit_hop.csv` provides the admitted/delivered composition by
-hop count and regular/tentative type.
 
 ## Tests
 
