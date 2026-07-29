@@ -31,6 +31,7 @@ METRICS = (
     ("credit_delivery_ratio", "higher"),
     ("admitted_credit_delivery_ratio", "higher"),
     ("overflow_credit_drops", "lower"),
+    ("pushout_credit_drops", "lower"),
     ("timeout_credit_drops", "lower"),
     ("shaping_credit_drops", "lower"),
     ("tentative_credit_drops", "lower"),

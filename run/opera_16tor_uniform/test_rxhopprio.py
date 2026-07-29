@@ -39,196 +39,131 @@ class RxHopPriorityContractTest(unittest.TestCase):
         cls.topology_cpp = TOPOLOGY_CPP.read_text(encoding="ascii")
         cls.analyzer = ANALYZER.read_text(encoding="ascii")
 
-    def test_command_line_mode_is_opt_in_and_reaches_only_host_nics(self):
+    def test_command_line_mode_is_opt_in_and_weights_reach_only_host_nics(self):
         self.assertIn("bool rx_hop_prio = false;", self.main_cpp)
-        self.assertIn("uint32_t rx_hop_quantum = 16;", self.main_cpp)
         self.assertIn('!strcmp(argv[i],"-rxhopprio")', self.main_cpp)
-        self.assertIn('!strcmp(argv[i],"-rxhopquantum")', self.main_cpp)
-        self.assertIn('{"rx_hop_prio",rx_hop_prio ? 1U : 0U}', self.main_cpp)
-        self.assertIn('{"rx_hop_quantum",rx_hop_quantum}', self.main_cpp)
-        self.assertIn("host-level flow-aware Credit", self.main_cpp)
+        self.assertIn('!strcmp(argv[i],"-rxhopweights")', self.main_cpp)
+        self.assertIn("uint32_t rx_hop_weight_high = 4;", self.main_cpp)
+        self.assertIn("uint32_t rx_hop_weight_medium = 2;", self.main_cpp)
+        self.assertIn("uint32_t rx_hop_weight_low = 1;", self.main_cpp)
+        self.assertNotIn("rxhopquantum", self.main_cpp)
 
         alloc_src = function_body(
             self.topology_cpp, "Queue* DynExpTopology::alloc_src_queue"
         )
         alloc_tor = function_body(
-            self.topology_cpp, "Queue* DynExpTopology::alloc_queue(QueueLogger* queueLogger, uint64_t"
+            self.topology_cpp,
+            "Queue* DynExpTopology::alloc_queue(QueueLogger* queueLogger, uint64_t",
         )
         self.assertIn('_params.find("rx_hop_prio")', alloc_src)
-        self.assertIn('_params.find("rx_hop_quantum")', alloc_src)
-        self.assertIn("uint32_t rx_hop_quantum = 16", alloc_src)
+        self.assertIn('rx_hop_weight_high', alloc_src)
+        self.assertIn("new NICCreditQueue", alloc_src)
         self.assertNotIn("rx_hop_prio", alloc_tor)
 
-    def test_generated_credit_queue_is_fifo_again(self):
-        next_credit = function_body(
-            self.queue_cpp, "inline int CreditQueue::next_cred"
-        )
-        begin = function_body(self.queue_cpp, "void CreditQueue::beginService")
-        admission = function_body(self.queue_cpp, "bool CreditQueue::handleCredit")
-        nic_complete = function_body(
-            self.queue_cpp, "void NICCreditQueue::completeService"
-        )
-        self.assertNotIn("rx_hop", next_credit)
-        self.assertNotIn("selectRx", next_credit)
-        self.assertNotIn("rx_hop", begin)
-        self.assertNotIn("trackRx", admission)
-        self.assertIn("pkt = _enqueued_cred[prio].back()", nic_complete)
-        self.assertIn("_enqueued_cred[prio].pop_back()", nic_complete)
-        for old_symbol in (
-            "RxCreditPriority",
-            "RxFlowPriority",
-            "_rx_credit_order",
-            "_rx_flow_order",
-            "_rx_selected_credit",
-            "_rx_credit_in_service",
-        ):
-            self.assertNotIn(old_symbol, self.queue_h)
-            self.assertNotIn(old_symbol, self.queue_cpp)
-
-    def test_sink_event_submits_request_without_materializing_credit(self):
+    def test_original_per_flow_credit_generation_is_restored(self):
         event = function_body(self.xpass_cpp, "void XPassSink::doNextEvent")
-        self.assertIn("updateSliceFeedbackState()", event)
-        self.assertIn("_credit_request_pending", event)
-        self.assertIn("requestCredit(this)", event)
-        self.assertIn("emitCredit()", event)
-        self.assertNotIn("XPassPull::newpkt", event)
-        self.assertNotIn("_tot_sent_creds++", event)
-        self.assertNotIn("_credit_counter++", event)
-        self.assertNotIn("sendToNIC", event)
-
-    def test_emit_credit_preserves_original_generation_and_feedback(self):
         emit = function_body(self.xpass_cpp, "XPassPull* XPassSink::emitCredit")
+        self.assertIn("updateSliceFeedbackState()", event)
+        self.assertIn("emitCredit()", event)
         for fragment in (
             "XPassPull::newpkt",
-            "set_ackno",
-            "set_flow_id",
             "drand() <= rate",
             "set_tentative(false)",
             "set_tentative(true)",
             "_credit_counter++",
-            "_bw_sent_creds++",
             "_tot_sent_creds++",
             "sendToNIC(p)",
             "nextCreditWait()",
             "feedbackControl2()",
         ):
             self.assertIn(fragment, emit)
+        for removed in (
+            "RxCreditFlowScheduler",
+            "RxCreditFlowRequest",
+            "requestCredit",
+            "runFlowCreditScheduler",
+            "_active_credit_flow",
+            "_flow_credit_quantum",
+            "_credit_request_pending",
+            "_scheduled_credit_slice",
+        ):
+            self.assertNotIn(removed, self.queue_h + self.queue_cpp + self.xpass_h)
 
-    def test_one_pending_request_per_flow(self):
-        event = function_body(self.xpass_cpp, "void XPassSink::doNextEvent")
-        request = function_body(
-            self.queue_cpp, "void NICCreditQueue::requestCredit"
-        )
-        self.assertIn("if (!_credit_request_pending)", event)
-        self.assertIn("bool pending", self.queue_h)
-        self.assertIn("map<uint32_t, RxCreditFlowRequest>", self.queue_h)
-        self.assertIn("_rx_credit_requests.find(flow_id)", request)
-        self.assertIn("_next_request_sequence++", request)
-        self.assertIn("_credit_request_pending = false", self.queue_cpp)
+    def test_three_hop_classes_share_one_capacity(self):
+        classify = function_body(self.queue_cpp, "inline int CreditQueue::credit_prio")
+        receive = function_body(self.queue_cpp, "void CreditQueue::receivePacket")
+        self.assertIn("#define CRED_Q_N 3", self.queue_cpp)
+        self.assertIn("pkt.get_maxhops()", classify)
+        self.assertIn("hops <= 1", classify)
+        self.assertIn("hops == 2", classify)
+        self.assertIn("return 2", classify)
+        self.assertIn("queuesize_cred() > _maxsize_cred", receive)
+        self.assertNotIn("_maxsize_cred / CRED_Q_N", self.queue_cpp)
+        self.assertNotIn("_maxsize_cred / 3", self.queue_cpp)
 
-    def test_each_opportunity_recomputes_all_pending_current_routes(self):
-        select = function_body(
-            self.queue_cpp, "void NICCreditQueue::runFlowCreditScheduler"
-        )
-        compute = function_body(
-            self.queue_cpp, "int NICCreditQueue::computeRequestRoute"
-        )
-        self.assertIn("time_to_slice(eventlist().now())", select)
-        self.assertIn("_rx_credit_requests.begin()", select)
-        self.assertIn("computeRequestRoute(it->second, slice)", select)
-        self.assertIn("get_no_paths", compute)
-        self.assertIn("fast_rand() % npaths", compute)
-        self.assertIn("get_no_hops", compute)
-        self.assertNotIn("get_tidalhop", compute)
-        self.assertNotIn("get_maxhops", compute)
-
-    def test_priority_is_hops_then_request_fifo_without_aging(self):
-        select = function_body(
-            self.queue_cpp, "void NICCreditQueue::runFlowCreditScheduler"
-        )
-        self.assertIn("current_hops < shortest->second.current_hops", select)
-        self.assertIn("request_sequence < shortest->second.request_sequence", select)
-        self.assertIn("request_sequence < fifo_first->second.request_sequence", select)
-        for unsupported in ("aging", "slo", "flow_size", "wait_time"):
-            self.assertNotIn(unsupported, select.lower())
-
-    def test_scheduler_materializes_one_credit_without_bypassing_pacing(self):
-        schedule = function_body(
-            self.queue_cpp, "void NICCreditQueue::scheduleFlowCreditScheduler"
-        )
-        select = function_body(
-            self.queue_cpp, "void NICCreditQueue::runFlowCreditScheduler"
-        )
-        begin = function_body(self.queue_cpp, "void CreditQueue::beginService")
-        self.assertIn("updateAvailCredit()", schedule)
-        self.assertIn("_avail_cred == 0", schedule)
-        self.assertIn("_materialized_flow_credit", schedule)
-        self.assertIn("sink->emitCredit()", select)
-        self.assertNotIn("sendFromQueue", select)
-        self.assertIn("credit_ready()", begin)
-
-    def test_selected_flow_keeps_a_bounded_credit_quantum(self):
-        select = function_body(
-            self.queue_cpp, "void NICCreditQueue::runFlowCreditScheduler"
-        )
-        self.assertIn("_active_credit_flow", self.queue_h)
-        self.assertIn("_active_quantum_remaining", self.queue_h)
-        self.assertIn("_flow_credit_quantum", self.queue_h)
-        self.assertIn("_active_credit_flow->flow_id()", select)
-        self.assertIn("selected = active", select)
-        self.assertIn("_active_quantum_remaining--", select)
-        self.assertIn("_active_credit_flow = NULL", select)
-        self.assertIn("continued_quantum", select)
-
-        schedule = function_body(
-            self.queue_cpp, "void NICCreditQueue::scheduleFlowCreditScheduler"
-        )
-        self.assertIn("_active_credit_flow->_src->_finished", schedule)
-        self.assertIn("_rx_credit_requests.find(_active_credit_flow->flow_id())", schedule)
-        self.assertIn("return;", schedule)
-
-    def test_credit_lifecycle_hops_are_recorded_at_real_boundaries(self):
-        nic_complete = function_body(
-            self.queue_cpp, "void NICCreditQueue::completeService"
-        )
-        source_receive = function_body(
-            self.xpass_cpp, "void XPassSrc::receivePacket"
-        )
-        self.assertIn("recordFlowCreditAdmission(*pkt)", nic_complete)
-        self.assertIn("recordFlowCreditDelivery(pkt)", source_receive)
-        self.assertIn("admitted_path_hops_sum", self.queue_h)
-        self.assertIn("delivered_path_hops_sum", self.queue_h)
-        self.assertIn("reportCreditHopStats", self.queue_cpp)
-        self.assertIn('"per_credit_hop.csv"', self.analyzer)
-
-    def test_selected_route_is_attached_and_reused_only_in_same_slice(self):
-        send = function_body(self.xpass_cpp, "XPassSink::sendToNIC")
+    def test_each_priority_class_is_fifo(self):
+        admission = function_body(self.queue_cpp, "bool CreditQueue::handleCredit")
         complete = function_body(
             self.queue_cpp, "void NICCreditQueue::completeService"
         )
-        self.assertIn("_scheduled_credit_slice == slice", send)
-        self.assertIn("set_slice_sent(_scheduled_credit_slice)", send)
-        self.assertIn("set_path_index(path_index)", send)
+        self.assertIn("_enqueued_cred[prio].push_front(&pkt)", admission)
+        self.assertIn("pkt = _enqueued_cred[prio].back()", complete)
+        self.assertIn("_enqueued_cred[prio].pop_back()", complete)
+
+    def test_full_queue_pushes_out_only_lower_priority_waiters(self):
+        evict = function_body(
+            self.queue_cpp, "bool CreditQueue::evictLowerPriorityCredit"
+        )
+        receive = function_body(self.queue_cpp, "void CreditQueue::receivePacket")
+        self.assertIn("victim_prio > arriving_prio", evict)
+        self.assertIn("victim_prio = CRED_Q_N - 1", evict)
+        self.assertIn("queue.front()", evict)
+        self.assertIn("queue.pop_front()", evict)
+        self.assertIn("only_packet_is_in_service", evict)
+        self.assertIn("_tx_next == CRED", evict)
+        self.assertIn("evictLowerPriorityCredit(prio)", receive)
+        self.assertIn("dropQueuedCredit(&pkt, prio, false)", receive)
+
+    def test_service_is_weighted_and_work_conserving(self):
+        select = function_body(self.queue_cpp, "inline int CreditQueue::next_cred")
+        advance = function_body(
+            self.queue_cpp, "void CreditQueue::advanceCreditPriority"
+        )
+        self.assertIn("_credit_weights = {4, 2, 1}", self.queue_cpp)
+        self.assertIn("(_wrr_priority + offset) % CRED_Q_N", select)
+        self.assertIn("!_enqueued_cred[prio].empty()", select)
+        self.assertIn("_wrr_remaining--", advance)
+        self.assertIn("(_wrr_priority + 1) % CRED_Q_N", advance)
+        self.assertIn("_credit_weights[_wrr_priority]", advance)
+
+    def test_priority_is_fixed_at_nic_arrival_but_route_can_change_at_send(self):
+        send = function_body(self.xpass_cpp, "XPassSink::sendToNIC")
+        receive = function_body(self.queue_cpp, "void CreditQueue::receivePacket")
+        select = function_body(self.queue_cpp, "inline int CreditQueue::next_cred")
+        complete = function_body(
+            self.queue_cpp, "void NICCreditQueue::completeService"
+        )
+        for fragment in (
+            "time_to_slice(eventlist().now())",
+            "get_no_paths",
+            "get_no_hops",
+            "set_slice_sent(slice)",
+            "set_path_index(path_index)",
+            "set_maxhops(hops)",
+        ):
+            self.assertIn(fragment, send)
+        self.assertIn("int prio = credit_prio(pkt)", receive)
+        self.assertNotIn("time_to_slice", select)
         self.assertIn("pkt->get_slice_sent() == slice", complete)
         self.assertIn("path_index = pkt->get_path_index()", complete)
+        self.assertIn("path_index = fast_rand() % npaths", complete)
 
-    def test_scheduler_csv_is_emitted_by_shared_analyzer(self):
-        self.assertIn('fields[0] == "FlowCreditScheduler"', self.analyzer)
-        self.assertIn('"flow_credit_scheduler.csv"', self.analyzer)
-        for field in (
-            "time",
-            "slice",
-            "selected_flow",
-            "selected_hops",
-            "fifo_first_flow",
-            "fifo_first_hops",
-            "num_pending_flows",
-            "shortest_flow",
-            "shortest_hops",
-            "quantum_remaining_before",
-            "continued_quantum",
-        ):
-            self.assertIn(f'"{field}"', self.analyzer)
+    def test_priority_and_pushout_statistics_are_exported(self):
+        self.assertIn("CreditPriorityStats", self.queue_cpp)
+        self.assertIn("pushout", self.queue_h)
+        self.assertIn("priority_queues", self.analyzer)
+        self.assertIn('"per_priority_queue.csv"', self.analyzer)
+        self.assertIn('"pushout_credit_drops"', self.analyzer)
 
     def test_uniform_run_scripts_keep_mode_off_unless_requested(self):
         for directory in ("opera_16tor_uniform", "opera_108tor_uniform"):
@@ -237,7 +172,9 @@ class RxHopPriorityContractTest(unittest.TestCase):
             )
             self.assertIn("RX_HOP_PRIO=no", script)
             self.assertIn("--rxhopprio) RX_HOP_PRIO=yes", script)
-            self.assertIn("RX_HOP_PRIO_ARGS=(-rxhopprio -rxhopquantum", script)
+            self.assertIn("RX_HOP_WEIGHTS=4:2:1", script)
+            self.assertIn("-rxhopprio -rxhopweights", script)
+            self.assertNotIn("rxhopquantum", script)
 
 
 if __name__ == "__main__":

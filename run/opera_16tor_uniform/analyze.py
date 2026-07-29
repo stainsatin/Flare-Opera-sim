@@ -55,6 +55,27 @@ FLOW_CREDIT_LIFECYCLE_FIELDS = (
     "delivered_actual_hops_sum",
     "delivered_hop_mismatches",
 )
+FLOW_CREDIT_PRIORITY_FIELDS = ("pushout",)
+PRIORITY_QUEUE_FIELDS = (
+    "scope",
+    "id",
+    "port",
+    "priority",
+    "weight",
+    "arrivals",
+    "transmitted",
+    "queued",
+    "max_queued",
+    "dropped",
+    "pushouts",
+)
+PRIORITY_QUEUE_OUTPUT_FIELDS = (
+    *PRIORITY_QUEUE_FIELDS,
+    "tor",
+    "transmission_ratio",
+    "drop_ratio",
+    "pushout_ratio",
+)
 CREDIT_HOP_FIELDS = (
     "hops",
     "credit_type",
@@ -154,6 +175,7 @@ def parse_log(path):
     utilization = []
     input_load = []
     flow_credit_scheduler = []
+    priority_queues = []
     credit_hop_stats = []
     unfinished_markers = set()
     topology_clip = {"credit": 0, "data": 0, "control": 0, "other": 0}
@@ -229,6 +251,7 @@ def parse_log(path):
                     )
                 else:
                     record.update({name: 0 for name in FLOW_CREDIT_LIFECYCLE_FIELDS})
+                record["pushout"] = int(fields[32]) if len(fields) >= 33 else 0
                 flow_credits[flow_id] = record
             elif fields[0] == "CreditHopStats" and len(fields) >= 8:
                 hops = int(fields[1])
@@ -277,6 +300,34 @@ def parse_log(path):
                 for name in FLOW_SCHEDULER_FIELDS:
                     record.setdefault(name, "")
                 flow_credit_scheduler.append(record)
+            elif fields[0] == "CreditPriorityStats" and len(fields) >= 12:
+                record = {
+                    "scope": fields[1],
+                    "id": int(fields[2]),
+                    "port": int(fields[3]),
+                    "priority": fields[4],
+                    "weight": int(fields[5]),
+                    "arrivals": int(fields[6]),
+                    "transmitted": int(fields[7]),
+                    "queued": int(fields[8]),
+                    "max_queued": int(fields[9]),
+                    "dropped": int(fields[10]),
+                    "pushouts": int(fields[11]),
+                }
+                arrivals = record["arrivals"]
+                record.update(
+                    {
+                        "tor": "",
+                        "transmission_ratio": (
+                            record["transmitted"] / arrivals if arrivals else 0.0
+                        ),
+                        "drop_ratio": record["dropped"] / arrivals if arrivals else 0.0,
+                        "pushout_ratio": (
+                            record["pushouts"] / arrivals if arrivals else 0.0
+                        ),
+                    }
+                )
+                priority_queues.append(record)
             elif fields[0] == "TopologyClipStats" and len(fields) >= 5:
                 topology_clip = dict(
                     zip(topology_clip, (int(value) for value in fields[1:5]))
@@ -309,6 +360,7 @@ def parse_log(path):
         "utilization": utilization,
         "input_load": input_load,
         "flow_credit_scheduler": flow_credit_scheduler,
+        "priority_queues": priority_queues,
         "credit_hop_stats": credit_hop_stats,
         "unfinished_markers": unfinished_markers,
         "topology_clip": topology_clip,
@@ -358,6 +410,7 @@ def build_flow_rows(trace, parsed):
             *FLOW_CREDIT_FIELDS,
             *FLOW_CREDIT_EXTRA_FIELDS,
             *FLOW_CREDIT_LIFECYCLE_FIELDS,
+            *FLOW_CREDIT_PRIORITY_FIELDS,
         ):
             row[name] = credit.get(name, 0)
         row["last_credit_path_hops"] = credit.get("last_credit_path_hops", "")
@@ -462,6 +515,12 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
     scheduler_rows_with_quantum = [
         row for row in scheduler_rows if row.get("continued_quantum", "") != ""
     ]
+    priority_rows = parsed.get("priority_queues", [])
+
+    def priority_sum(priority, field):
+        return sum(
+            row[field] for row in priority_rows if row["priority"] == priority
+        )
 
     tor_active_goodputs = []
     for tor in sorted({row["source_tor"] for row in flow_rows}):
@@ -537,6 +596,24 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
             if scheduler_rows_with_quantum
             else ""
         ),
+        "priority_queue_arrivals": sum(row["arrivals"] for row in priority_rows),
+        "priority_queue_transmissions": sum(
+            row["transmitted"] for row in priority_rows
+        ),
+        "priority_queue_drops": sum(row["dropped"] for row in priority_rows),
+        "priority_queue_pushouts": sum(row["pushouts"] for row in priority_rows),
+        "high_priority_arrivals": priority_sum("high", "arrivals"),
+        "high_priority_transmissions": priority_sum("high", "transmitted"),
+        "high_priority_drops": priority_sum("high", "dropped"),
+        "high_priority_pushouts": priority_sum("high", "pushouts"),
+        "medium_priority_arrivals": priority_sum("medium", "arrivals"),
+        "medium_priority_transmissions": priority_sum("medium", "transmitted"),
+        "medium_priority_drops": priority_sum("medium", "dropped"),
+        "medium_priority_pushouts": priority_sum("medium", "pushouts"),
+        "low_priority_arrivals": priority_sum("low", "arrivals"),
+        "low_priority_transmissions": priority_sum("low", "transmitted"),
+        "low_priority_drops": priority_sum("low", "dropped"),
+        "low_priority_pushouts": priority_sum("low", "pushouts"),
         "mean_credit_path_hops": (
             sum(row["path_hops_sum"] for row in flow_rows) / generated
             if generated
@@ -630,6 +707,7 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         "credit_delivery_ratio": delivered / generated if generated else 0.0,
         "admitted_credit_delivery_ratio": delivered / admitted if admitted else 0.0,
         "overflow_credit_drops": sum(row["overflow"] for row in flow_rows),
+        "pushout_credit_drops": sum(row["pushout"] for row in flow_rows),
         "timeout_credit_drops": sum(row["timeout"] for row in flow_rows),
         "shaping_credit_drops": sum(row["shaping"] for row in flow_rows),
         "tentative_credit_drops": sum(row["tentative"] for row in flow_rows),
@@ -762,6 +840,11 @@ def add_queue_labels(queue_rows, hosts_per_tor):
         row["max_data_queue_packets"] = row["max_data_queue_bytes"] / 1500.0
 
 
+def add_priority_queue_labels(priority_rows, hosts_per_tor):
+    for row in priority_rows:
+        row["tor"] = row["id"] // hosts_per_tor if row["scope"] == "host" else row["id"]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("results", type=Path)
@@ -815,6 +898,7 @@ def main():
     flow_rows = build_flow_rows(trace, parsed)
     credit_hop_rows = build_credit_hop_rows(parsed)
     add_queue_labels(parsed["queues"], args.hosts_per_tor)
+    add_priority_queue_labels(parsed["priority_queues"], args.hosts_per_tor)
     summary = build_summary(
         flow_rows,
         parsed["queues"],
@@ -829,6 +913,11 @@ def main():
     write_csv(args.results / "per_flow.csv", flow_rows, list(flow_rows[0]))
     write_csv(args.results / "per_queue.csv", parsed["queues"], list(parsed["queues"][0]))
     write_csv(args.results / "per_tor.csv", tor_rows, list(tor_rows[0]))
+    write_csv(
+        args.results / "per_priority_queue.csv",
+        parsed["priority_queues"],
+        list(PRIORITY_QUEUE_OUTPUT_FIELDS),
+    )
     write_csv(
         args.results / "per_credit_hop.csv",
         credit_hop_rows,
@@ -863,6 +952,13 @@ def main():
             f"continued-quantum={summary['continued_quantum_ratio']:.2%} "
             f"selected-shortest={summary['shortest_flow_selection_ratio']:.2%}"
         )
+    if summary["priority_queue_arrivals"]:
+        print(
+            "NIC priority queues: "
+            f"transmitted={summary['priority_queue_transmissions']}, "
+            f"dropped={summary['priority_queue_drops']}, "
+            f"pushouts={summary['priority_queue_pushouts']}"
+        )
     print(
         f"Known data drops: {summary['known_data_drops']} "
         f"(queue={summary['data_queue_drops']}, "
@@ -873,6 +969,7 @@ def main():
     print(f"Wrote {args.results / 'per_flow.csv'}")
     print(f"Wrote {args.results / 'per_queue.csv'}")
     print(f"Wrote {args.results / 'per_tor.csv'}")
+    print(f"Wrote {args.results / 'per_priority_queue.csv'}")
     print(f"Wrote {args.results / 'per_credit_hop.csv'}")
     print(f"Wrote {args.results / 'flow_credit_scheduler.csv'}")
 

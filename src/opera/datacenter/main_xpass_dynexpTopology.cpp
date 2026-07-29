@@ -45,11 +45,14 @@ void report_credit_stats(DynExpTopology* top) {
          << "shaping_admitted" << endl;
     cout << "# DataQueueStats scope id port dropped max_queued_bytes "
          << "current_queued_bytes" << endl;
+    cout << "# CreditPriorityStats scope id port priority weight arrivals "
+         << "transmitted queued max_queued dropped pushouts" << endl;
     for (int host = 0; host < top->no_of_nodes(); host++) {
         CreditQueue* queue = dynamic_cast<CreditQueue*>(
             top->get_queue_serv_tor(host));
         assert(queue);
         queue->reportCreditStats("host", host, -1);
+        queue->reportPriorityStats("host", host, -1);
         cout << "DataQueueStats host " << host << " -1 "
              << queue->num_drops() << " "
              << queue->max_ever_recorded_size() << " "
@@ -126,8 +129,10 @@ int main(int argc, char **argv) {
     bool fb_sens = false; //weight feedback adjustment with prob function
     bool is_flare = false; //false=flare, true=xpass
     bool rx_hop_prio = false;
-    uint32_t rx_hop_quantum = 16;
-    bool rx_hop_quantum_set = false;
+    uint32_t rx_hop_weight_high = 4;
+    uint32_t rx_hop_weight_medium = 2;
+    uint32_t rx_hop_weight_low = 1;
+    bool rx_hop_weights_set = false;
     int jit_a = -1; //jittering K value
     int jit_b = -1; //jittering K value
     double fb_w_factor = 2.0; //weight adjustment factor
@@ -177,15 +182,24 @@ int main(int argc, char **argv) {
 	    is_flare = true;
 	} else if (!strcmp(argv[i],"-rxhopprio")){
 	    rx_hop_prio = true;
-	} else if (!strcmp(argv[i],"-rxhopquantum")){
-        int parsed_quantum = atoi(argv[i+1]);
-        if (parsed_quantum <= 0) {
-            cout << "-rxhopquantum must be greater than zero" << endl;
+	} else if (!strcmp(argv[i],"-rxhopweights")){
+        if (i + 3 >= argc) {
+            cout << "-rxhopweights requires three values: high medium low"
+                 << endl;
             exit(1);
         }
-        rx_hop_quantum = parsed_quantum;
-        rx_hop_quantum_set = true;
-        i++;
+        int high = atoi(argv[i+1]);
+        int medium = atoi(argv[i+2]);
+        int low = atoi(argv[i+3]);
+        if (high <= 0 || medium <= 0 || low <= 0) {
+            cout << "-rxhopweights values must be greater than zero" << endl;
+            exit(1);
+        }
+        rx_hop_weight_high = high;
+        rx_hop_weight_medium = medium;
+        rx_hop_weight_low = low;
+        rx_hop_weights_set = true;
+        i += 3;
 	} else if (!strcmp(argv[i],"-probfile")) {
 		string probfile = argv[i+1];
         hops_to_prob = read_probfun(probfile);
@@ -222,14 +236,15 @@ int main(int argc, char **argv) {
         cout << "Both -topfile and -flowfile are required" << endl;
         exit(1);
     }
-    if (rx_hop_quantum_set && !rx_hop_prio) {
-        cout << "-rxhopquantum requires -rxhopprio" << endl;
+    if (rx_hop_weights_set && !rx_hop_prio) {
+        cout << "-rxhopweights requires -rxhopprio" << endl;
         exit(1);
     }
     if (rx_hop_prio) {
-        cout << "Receiver hop priority: host-level flow-aware Credit "
-             << "generation (shortest-current-path-first, quantum="
-             << rx_hop_quantum << ")" << endl;
+        cout << "Receiver hop priority: shared NIC Credit buffer with "
+             << "arrival-time hop classes and WRR weights "
+             << rx_hop_weight_high << ":" << rx_hop_weight_medium << ":"
+             << rx_hop_weight_low << endl;
     }
 
     eventlist.setEndtime(timeFromSec(simtime));
@@ -258,7 +273,9 @@ int main(int argc, char **argv) {
         {{"cq_size",cred_queuesize},{"sh_thresh",shaping_thresh},
         {"ae_thresh",aeolus_thresh},{"te_thresh",tent_thresh},
         {"rx_hop_prio",rx_hop_prio ? 1U : 0U},
-        {"rx_hop_quantum",rx_hop_quantum}};
+        {"rx_hop_weight_high",rx_hop_weight_high},
+        {"rx_hop_weight_medium",rx_hop_weight_medium},
+        {"rx_hop_weight_low",rx_hop_weight_low}};
     DynExpTopology* top = new DynExpTopology(queuesize, &logfile, &eventlist, 
         CREDIT, topfile, params);
     top->set_prob_hops(hops_to_prob);

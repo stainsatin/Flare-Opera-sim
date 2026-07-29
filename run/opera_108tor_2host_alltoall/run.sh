@@ -17,7 +17,7 @@ START_STRIDE=53
 SPREAD_SUPERSLICES=108
 BASE_START_NS=1000
 SCHEDULER=both
-RX_HOP_QUANTUM=16
+RX_HOP_WEIGHTS=4:2:1
 CWND=40
 DATA_QUEUE=600
 CREDIT_QUEUE=60
@@ -34,7 +34,7 @@ Usage: bash run/opera_108tor_2host_alltoall/run.sh [options]
 
 Options:
   --scheduler MODE          fifo, rxhopprio, or both (default: both)
-  --rxhop-quantum CREDITS   Credits served per selected Flow (default: 16)
+  --rxhop-weights H:M:L     NIC Credit WRR weights (default: 4:2:1)
   --flow-size-mib MIB       Size of every flow (default: 1)
   --fanout COUNT            Remote ToRs contacted by each host, 1..107 (default: 107)
   --start-mode MODE         cycle_spread, staggered, or synchronized
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --flow-size-mib) FLOW_SIZE_MIB="$2"; shift 2 ;;
-        --rxhop-quantum) RX_HOP_QUANTUM="$2"; shift 2 ;;
+        --rxhop-weights) RX_HOP_WEIGHTS="$2"; shift 2 ;;
         --fanout) FANOUT="$2"; shift 2 ;;
         --start-mode)
             case "$2" in
@@ -106,10 +106,11 @@ if [[ ! -f "${SOURCE_TOPOLOGY}" ]]; then
     echo "Source topology not found: ${SOURCE_TOPOLOGY}" >&2
     exit 1
 fi
-if ! [[ "${RX_HOP_QUANTUM}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "--rxhop-quantum must be a positive integer" >&2
+if ! [[ "${RX_HOP_WEIGHTS}" =~ ^[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$ ]]; then
+    echo "--rxhop-weights must be three positive integers (H:M:L)" >&2
     exit 2
 fi
+IFS=: read -r RX_HOP_WEIGHT_HIGH RX_HOP_WEIGHT_MEDIUM RX_HOP_WEIGHT_LOW <<< "${RX_HOP_WEIGHTS}"
 
 python3 "${SCRIPT_DIR}/build_topology.py" \
     --source "${SOURCE_TOPOLOGY}" \
@@ -184,7 +185,8 @@ run_case() {
     local case_dir="${OUTPUT_ROOT}/${case_name}"
     local priority_args=()
     if [[ "${case_name}" == rxhopprio ]]; then
-        priority_args=(-rxhopprio -rxhopquantum "${RX_HOP_QUANTUM}")
+        priority_args=(-rxhopprio -rxhopweights \
+            "${RX_HOP_WEIGHT_HIGH}" "${RX_HOP_WEIGHT_MEDIUM}" "${RX_HOP_WEIGHT_LOW}")
     fi
 
     mkdir -p "${case_dir}/traffic"

@@ -15,9 +15,12 @@ CreditStats host 4 -1 100 90 0 4 10 5 0 5 0 20 10
 DataQueueStats host 4 -1 1 3000 0
 CreditStats tor 1 4 90 70 0 8 15 0 0 15 0 40 25
 DataQueueStats tor 1 4 2 4500 0
-FlowCreditStats 0 0 4 2 100 70 190 160 30 5 0 20 0 40 25 60 5 1 4 200 90 10 20 1 4 180 1 4 140 140 0
+FlowCreditStats 0 0 4 2 100 70 190 160 30 5 0 20 0 40 25 60 5 1 4 200 90 10 20 1 4 180 1 4 140 140 0 3
 CreditHopStats 2 regular 60 55 50 5 5 100 0
 CreditHopStats 2 tentative 40 35 20 5 15 40 0
+CreditPriorityStats host 4 -1 high 4 40 35 0 12 5 0
+CreditPriorityStats host 4 -1 medium 2 35 25 0 15 10 2
+CreditPriorityStats host 4 -1 low 1 25 10 0 20 15 3
 TopologyClipStats 5 2 1 0
 TopologyWrongDstStats 0 1 0 0
 """
@@ -30,6 +33,10 @@ TopologyWrongDstStats 0 1 0 0
         self.assertEqual(parsed["flow_credits"][0]["path_hops_sum"], 200)
         self.assertEqual(parsed["flow_credits"][0]["admitted"], 90)
         self.assertEqual(parsed["flow_credits"][0]["delivered_path_hops_sum"], 140)
+        self.assertEqual(parsed["flow_credits"][0]["pushout"], 3)
+        self.assertEqual(len(parsed["priority_queues"]), 3)
+        self.assertEqual(parsed["priority_queues"][1]["priority"], "medium")
+        self.assertEqual(parsed["priority_queues"][1]["pushouts"], 2)
         hop_rows = analyze.build_credit_hop_rows(parsed)
         combined = next(row for row in hop_rows if row["credit_type"] == "all")
         self.assertEqual(combined["delivered"], 70)
@@ -96,6 +103,7 @@ TopologyWrongDstStats 0 1 0 0
                     "delivered_path_hops_max": 8,
                     "delivered_actual_hops_sum": 200,
                     "delivered_hop_mismatches": 0,
+                    "pushout": 0,
                 }
             )
 

@@ -14,9 +14,6 @@
 #include "network.h"
 #include "loggertypes.h"
 
-class XPassSink;
-class NICCreditQueue;
-
 struct FlowCreditCounters {
     uint32_t sender = 0;
     uint32_t receiver = 0;
@@ -48,6 +45,7 @@ struct FlowCreditCounters {
     uint64_t delivered_path_hops_sum = 0;
     uint64_t delivered_actual_hops_sum = 0;
     uint64_t delivered_hop_mismatches = 0;
+    uint64_t pushout = 0;
 };
 
 void reportFlowCreditStats();
@@ -67,6 +65,7 @@ class CreditQueue : public Queue {
     void reportLoss();
     virtual void reportMaxqueuesize();
     void reportCreditStats(const string& scope, int id, int port);
+    void reportPriorityStats(const string& scope, int id, int port);
  protected:
     enum pkt_type {NONE, DATA, CRED};
     pkt_type _tx_next;
@@ -78,6 +77,10 @@ class CreditQueue : public Queue {
     bool credit_ready();
     int credit_prio(Packet &pkt);
     int next_cred();
+    void advanceCreditPriority(int served_prio);
+    bool evictLowerPriorityCredit(int arriving_prio);
+    void dropQueuedCredit(Packet* pkt, int prio, bool pushout);
+    void notePriorityDrop(int prio, bool pushout);
     mem_b queuesize_cred(int prio); //queue within a certain prio
     mem_b queuesize_cred(); //full queue size
     mem_b _maxsize_cred;
@@ -105,54 +108,26 @@ class CreditQueue : public Queue {
     mem_b _max_cred_queue;
     map<int, uint64_t> _hops_to_creds;
     bool _is_nic;
-};
-
-class RxCreditFlowScheduler : public EventSource {
- public:
-    RxCreditFlowScheduler(EventList& eventlist, NICCreditQueue* nic);
-    void doNextEvent();
-    void schedule(simtime_picosec when);
-
- private:
-    NICCreditQueue* _nic;
-    bool _event_pending;
-    simtime_picosec _scheduled_time;
+    bool _rx_hop_prio;
+    vector<uint32_t> _credit_weights;
+    int _wrr_priority;
+    uint32_t _wrr_remaining;
+    vector<uint64_t> _priority_arrivals;
+    vector<uint64_t> _priority_transmissions;
+    vector<uint64_t> _priority_drops;
+    vector<uint64_t> _priority_pushouts;
+    vector<mem_b> _priority_max_queued;
 };
 
 class NICCreditQueue : public CreditQueue {
-    friend class RxCreditFlowScheduler;
  public:
     NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize, EventList &eventlist,
 		QueueLogger* logger, DynExpTopology *top,
         mem_b credsize, mem_b shaping_thresh, mem_b aeolus_thresh,
         mem_b tent_thresh, bool rx_hop_prio = false,
-        uint32_t flow_credit_quantum = 16);
-    bool flowCreditSchedulingEnabled() const { return _rx_hop_prio; }
-    void requestCredit(XPassSink* sink);
+        uint32_t high_weight = 4, uint32_t medium_weight = 2,
+        uint32_t low_weight = 1);
     void completeService();
-
- private:
-    struct RxCreditFlowRequest {
-        XPassSink* sink;
-        uint64_t request_sequence;
-        bool pending;
-        int current_hops;
-        int route_slice;
-        int path_index;
-    };
-
-    void scheduleFlowCreditScheduler();
-    void runFlowCreditScheduler();
-    int computeRequestRoute(RxCreditFlowRequest& request, int slice);
-
-    bool _rx_hop_prio;
-    bool _materialized_flow_credit;
-    uint64_t _next_request_sequence;
-    uint32_t _flow_credit_quantum;
-    uint32_t _active_quantum_remaining;
-    XPassSink* _active_credit_flow;
-    map<uint32_t, RxCreditFlowRequest> _rx_credit_requests;
-    RxCreditFlowScheduler _flow_scheduler;
 };
 
 #endif

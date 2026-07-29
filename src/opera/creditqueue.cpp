@@ -121,7 +121,7 @@ void recordFlowCreditTopologyDrop(Packet& pkt, uint32_t consumed_hops) {
 #define SYMM_ROUTING
 #define SELECTIVE_DROP
 #define PROB_REMAINING
-#define CRED_Q_N 1
+#define CRED_Q_N 3
 
 CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
                          EventList &eventlist, QueueLogger *logger, int tor,
@@ -157,6 +157,15 @@ CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _cred_timeout = 100 * _data_size * _ps_per_byte;
   _next_prio = -1;
   _is_nic = false;
+  _rx_hop_prio = false;
+  _credit_weights = {4, 2, 1};
+  _wrr_priority = 0;
+  _wrr_remaining = _credit_weights[0];
+  _priority_arrivals.assign(CRED_Q_N, 0);
+  _priority_transmissions.assign(CRED_Q_N, 0);
+  _priority_drops.assign(CRED_Q_N, 0);
+  _priority_pushouts.assign(CRED_Q_N, 0);
+  _priority_max_queued.assign(CRED_Q_N, 0);
 }
 
 simtime_picosec CreditQueue::cred_tx_delta() {
@@ -198,12 +207,12 @@ void CreditQueue::updateAvailCredit() {
 // extract priority information from credit packet
 inline int CreditQueue::credit_prio(Packet &pkt) {
   assert(pkt.type() == XPCREDIT);
-  XPassPull *p = (XPassPull *)&pkt;
-  if (p->prio()) {
-    return 0;
-  } else {
-    return CRED_Q_N - 1;
-  }
+  if (!_is_nic || !_rx_hop_prio) return CRED_Q_N - 1;
+
+  int hops = max(pkt.get_maxhops(), 0);
+  if (hops <= 1) return 0;
+  if (hops == 2) return 1;
+  return 2;
 }
 
 // check for next possible credit to send and drops credits that timed out
@@ -216,24 +225,93 @@ inline int CreditQueue::next_cred() {
       // look for not expired packet
       while (!_enqueued_cred[i].empty()) {
         Packet *p = _enqueued_cred[i].back();
-        // if not expired, return prio queue idx
-        if (eventlist().now() + drainTime(p) <= p->get_tmp_ts()) {
-          return i;
-        }
+        // Stop once the oldest packet in this FIFO is not expired.
+        if (eventlist().now() + drainTime(p) <= p->get_tmp_ts()) break;
         // else packet expired, drop and try next
         assert(_queuesize_cred[i] > 0);
         _queuesize_cred[i] -= p->size();
         _hops_to_creds[max((p->get_maxhops() - p->get_crthop()), 1)] -= 1;
         _drop_creds++;
         _drop_timeout++;
+        notePriorityDrop(i, false);
         recordFlowCreditDrop(*p, &FlowCreditCounters::timeout, _is_nic);
         p->free();
         _enqueued_cred[i].pop_back();
       }
-      // cout << "next cred prio " << i << endl;
     }
   }
+
+  if (_is_nic && _rx_hop_prio) {
+    for (int offset = 0; offset < CRED_Q_N; offset++) {
+      int prio = (_wrr_priority + offset) % CRED_Q_N;
+      if (!_enqueued_cred[prio].empty()) return prio;
+    }
+    return -1;
+  }
+
+  for (int i = 0; i < CRED_Q_N; i++) {
+    if (!_enqueued_cred[i].empty()) return i;
+  }
   return -1;
+}
+
+void CreditQueue::advanceCreditPriority(int served_prio) {
+  if (!_is_nic || !_rx_hop_prio) return;
+  assert(served_prio >= 0 && served_prio < CRED_Q_N);
+
+  if (_wrr_priority != served_prio) {
+    _wrr_priority = served_prio;
+    _wrr_remaining = _credit_weights[served_prio];
+  }
+  assert(_wrr_remaining > 0);
+  _wrr_remaining--;
+  if (_wrr_remaining == 0) {
+    _wrr_priority = (_wrr_priority + 1) % CRED_Q_N;
+    _wrr_remaining = _credit_weights[_wrr_priority];
+  }
+}
+
+void CreditQueue::notePriorityDrop(int prio, bool pushout) {
+  if (!_is_nic || !_rx_hop_prio) return;
+  assert(prio >= 0 && prio < CRED_Q_N);
+  _priority_drops[prio]++;
+  if (pushout) _priority_pushouts[prio]++;
+}
+
+void CreditQueue::dropQueuedCredit(Packet* pkt, int prio, bool pushout) {
+  assert(pkt != NULL);
+  assert(prio >= 0 && prio < CRED_Q_N);
+  assert(_queuesize_cred[prio] >= pkt->size());
+  _queuesize_cred[prio] -= pkt->size();
+  _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
+  _drop_creds++;
+  _drop_overflow++;
+  notePriorityDrop(prio, pushout);
+  if (pushout) flowCreditCounters(*pkt).pushout++;
+  __global_network_tot_cred_waste += max(pkt->get_crthop(), 0);
+  recordFlowCreditDrop(*pkt, &FlowCreditCounters::overflow, _is_nic);
+  pkt->free();
+}
+
+bool CreditQueue::evictLowerPriorityCredit(int arriving_prio) {
+  assert(_is_nic && _rx_hop_prio);
+  for (int victim_prio = CRED_Q_N - 1;
+       victim_prio > arriving_prio; victim_prio--) {
+    list<Packet*>& queue = _enqueued_cred[victim_prio];
+    if (queue.empty()) continue;
+
+    bool only_packet_is_in_service =
+        _tx_next == CRED && _next_prio == victim_prio && queue.size() == 1;
+    if (only_packet_is_in_service) continue;
+
+    // Newest low-priority Credit is displaced; an already serialized Credit
+    // at the FIFO back is never preempted.
+    Packet* victim = queue.front();
+    queue.pop_front();
+    dropQueuedCredit(victim, victim_prio, true);
+    return true;
+  }
+  return false;
 }
 
 mem_b CreditQueue::queuesize_cred(int prio) {
@@ -275,17 +353,21 @@ static double hops_to_chance_exp(int hops) {
 bool CreditQueue::handleCredit(Packet &pkt) {
   assert(pkt.type() == XPCREDIT);
   int prio = credit_prio(pkt);
-  if (queuesize_cred(prio) > _max_tent_cred &&
+  mem_b admission_occupancy =
+      (_is_nic && _rx_hop_prio) ? queuesize_cred()
+                                : queuesize_cred(prio);
+  if (admission_occupancy > _max_tent_cred &&
       ((XPassPull *)&pkt)->tentative()) {
     // cout << nodename() << " TENTATIVE DROPPED for " << pkt.flow_id() << endl;
     _drop_creds++;
     _drop_tentative++;
+    notePriorityDrop(prio, false);
     recordFlowCreditDrop(pkt, &FlowCreditCounters::tentative, _is_nic);
     pkt.free();
     return false;
   }
   if(((XPassPull*)&pkt)->get_xpsrc()->_is_flare) {
-      if (queuesize_cred(prio) > _shaping_thresh) {
+      if (admission_occupancy > _shaping_thresh) {
           _shaping_checks++;
           flowCreditCounters(pkt).shaping_checks++;
           int remaining_hops = pkt.get_tidalhop();
@@ -308,6 +390,7 @@ bool CreditQueue::handleCredit(Packet &pkt) {
               pkt.free();
               _drop_creds++;
               _drop_shaping++;
+              notePriorityDrop(prio, false);
               return false;
           }
           _shaping_admitted++;
@@ -318,10 +401,13 @@ bool CreditQueue::handleCredit(Packet &pkt) {
   pkt.set_tmp_ts(eventlist().now() + _cred_timeout);
   _enqueued_cred[prio].push_front(&pkt);
   _queuesize_cred[prio] += pkt.size();
-  _max_cred_queue = max(_max_cred_queue, queuesize_cred());
   _hops_to_creds[max((pkt.get_maxhops() - pkt.get_crthop()), 1)] += 1;
   // measure in term of data packet size
-  pkt.inc_queueing(_enqueued_cred[prio].size() * 1500);
+  uint64_t queued_credits =
+      (_is_nic && _rx_hop_prio)
+          ? queuesize_cred() / pkt.size()
+          : _enqueued_cred[prio].size();
+  pkt.inc_queueing(queued_credits * 1500);
   return true;
 }
 
@@ -337,6 +423,7 @@ void CreditQueue::receivePacket(Packet &pkt) {
   if (pkt.type() == XPCREDIT) {
     int prio = credit_prio(pkt);
     _tot_creds++;
+    if (_is_nic && _rx_hop_prio) _priority_arrivals[prio]++;
     FlowCreditCounters& counters = flowCreditCounters(pkt);
     counters.queue_arrivals++;
     if (_is_nic) {
@@ -349,7 +436,8 @@ void CreditQueue::receivePacket(Packet &pkt) {
       creditHopCounters(pkt).generated++;
     }
     // cout << "xpcredit\n";
-    if (queuesize_cred(prio) + pkt.size() > _maxsize_cred) {
+    bool priority_nic = _is_nic && _rx_hop_prio;
+    if (!priority_nic && queuesize_cred() + pkt.size() > _maxsize_cred) {
       // if the credit doesn't fit in the queue, drop it
       // cout << nodename() << " CREDIT DROPPED (overflow) for " <<
       // pkt.flow_id() << endl;
@@ -358,9 +446,25 @@ void CreditQueue::receivePacket(Packet &pkt) {
       pkt.free();
       _drop_creds++;
       _drop_overflow++;
+      notePriorityDrop(prio, false);
       return;
     }
     if (!handleCredit(pkt)) return;
+    if (priority_nic) {
+      while (queuesize_cred() > _maxsize_cred &&
+             evictLowerPriorityCredit(prio)) {
+      }
+      if (queuesize_cred() > _maxsize_cred) {
+        assert(!_enqueued_cred[prio].empty());
+        assert(_enqueued_cred[prio].front() == &pkt);
+        _enqueued_cred[prio].pop_front();
+        dropQueuedCredit(&pkt, prio, false);
+        return;
+      }
+      _priority_max_queued[prio] =
+          max(_priority_max_queued[prio], _queuesize_cred[prio]);
+    }
+    _max_cred_queue = max(_max_cred_queue, queuesize_cred());
   } else {
     // cout << "xpdata\n";
     if (_queuesize + pkt.size() > _maxsize) {
@@ -409,7 +513,7 @@ void CreditQueue::receivePacket(Packet &pkt) {
     /* schedule the dequeue event */
     if (pkt.type() == XPCREDIT) {
       int prio = next_cred();
-      assert(_enqueued_cred[prio].size() == 1 && _enqueued.size() == 0);
+      assert(prio >= 0 && _enqueued.size() == 0);
     } else {
       assert(_enqueued.size() == 1 && queuesize_cred() == 0);
     }
@@ -458,6 +562,8 @@ void CreditQueue::completeService() {
     updatePktOut(pkt->flow_id());
     _queuesize_cred[prio] -= pkt->size();
     _tx_creds++;
+    if (_is_nic && _rx_hop_prio) _priority_transmissions[prio]++;
+    advanceCreditPriority(prio);
     FlowCreditCounters& counters = flowCreditCounters(*pkt);
     counters.queue_transmissions++;
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
@@ -507,6 +613,21 @@ void CreditQueue::reportCreditStats(const string& scope, int id, int port) {
        << _shaping_admitted << endl;
 }
 
+void CreditQueue::reportPriorityStats(const string& scope, int id, int port) {
+  if (!_is_nic || !_rx_hop_prio) return;
+  static const char* names[CRED_Q_N] = {"high", "medium", "low"};
+  for (int prio = 0; prio < CRED_Q_N; prio++) {
+    cout << "CreditPriorityStats " << scope << " " << id << " " << port
+         << " " << names[prio] << " " << _credit_weights[prio] << " "
+         << _priority_arrivals[prio] << " "
+         << _priority_transmissions[prio] << " "
+         << _queuesize_cred[prio] / 64 << " "
+         << _priority_max_queued[prio] / 64 << " "
+         << _priority_drops[prio] << " " << _priority_pushouts[prio]
+         << endl;
+  }
+}
+
 void reportFlowCreditStats() {
   cout << "# FlowCreditStats flow_id sender receiver path_hops generated "
        << "delivered queue_arrivals queue_transmissions dropped overflow "
@@ -516,7 +637,7 @@ void reportFlowCreditStats() {
        << "admitted_path_hops_max admitted_path_hops_sum "
        << "delivered_path_hops_min delivered_path_hops_max "
        << "delivered_path_hops_sum delivered_actual_hops_sum "
-       << "delivered_hop_mismatches"
+       << "delivered_hop_mismatches pushout"
        << endl;
   for (map<uint32_t, FlowCreditCounters>::const_iterator it =
            flow_credit_counters.begin();
@@ -541,7 +662,8 @@ void reportFlowCreditStats() {
          << counters.delivered_path_hops_max << " "
          << counters.delivered_path_hops_sum << " "
          << counters.delivered_actual_hops_sum << " "
-         << counters.delivered_hop_mismatches << endl;
+         << counters.delivered_hop_mismatches << " " << counters.pushout
+         << endl;
   }
 }
 
@@ -564,15 +686,17 @@ void reportCreditHopStats() {
 
 void CreditQueue::reportMaxqueuesize() {
   simtime_picosec crt_t = eventlist().now();
-  cout << "Queue " << _tor << " " << _port << " " << _max_recorded_size << " " << queuesize() << " " << _queuesize_cred[0]/64.0 << " ";
+  double queued_credits = queuesize_cred() / 64.0;
+  cout << "Queue " << _tor << " " << _port << " " << _max_recorded_size
+       << " " << queuesize() << " " << queued_credits << " ";
   reportLoss();
   map<int, uint64_t>::iterator it;
   cout << " DISTR ";
   for (it = _hops_to_creds.begin(); it != _hops_to_creds.end(); ++it) {
     int hops = it->first;
     uint64_t creds = it->second;
-    if (creds > 0) {
-      cout << hops << ":" << (double)creds / (_queuesize_cred[0] / 64.0) << " ";
+    if (creds > 0 && queued_credits > 0) {
+      cout << hops << ":" << (double)creds / queued_credits << " ";
     }
   }
   cout << endl;
@@ -582,265 +706,43 @@ void CreditQueue::reportMaxqueuesize() {
   _prev_sample_t = crt_t;
 }
 
-RxCreditFlowScheduler::RxCreditFlowScheduler(EventList& eventlist,
-                                             NICCreditQueue* nic)
-    : EventSource(eventlist, "rx_credit_flow_scheduler"),
-      _nic(nic),
-      _event_pending(false),
-      _scheduled_time(0) {}
-
-void RxCreditFlowScheduler::schedule(simtime_picosec when) {
-  assert(when >= eventlist().now());
-  if (_event_pending) {
-    if (when < _scheduled_time) {
-      eventlist().reschedulePendingSource(*this, when);
-      _scheduled_time = when;
-    }
-    return;
-  }
-
-  eventlist().sourceIsPending(*this, when);
-  _event_pending = true;
-  _scheduled_time = when;
-}
-
-void RxCreditFlowScheduler::doNextEvent() {
-  assert(_event_pending);
-  assert(eventlist().now() == _scheduled_time);
-  _event_pending = false;
-  _nic->runFlowCreditScheduler();
-}
-
-void NICCreditQueue::requestCredit(XPassSink* sink) {
-  assert(_rx_hop_prio);
-  assert(sink != NULL);
-  assert(sink->_credit_request_pending);
-  assert(_top->get_queue_serv_tor(sink->_src->get_flow_dst()) == this);
-
-  if (sink->_src->_finished) {
-    sink->_credit_request_pending = false;
-    if (_active_credit_flow == sink) {
-      _active_credit_flow = NULL;
-      _active_quantum_remaining = 0;
-      scheduleFlowCreditScheduler();
-    }
-    return;
-  }
-
-  uint32_t flow_id = sink->flow_id();
-  assert(_rx_credit_requests.find(flow_id) == _rx_credit_requests.end());
-
-  RxCreditFlowRequest request;
-  request.sink = sink;
-  request.request_sequence = _next_request_sequence++;
-  request.pending = true;
-  request.current_hops = 0;
-  request.route_slice = -1;
-  request.path_index = 0;
-  bool inserted =
-      _rx_credit_requests.insert(make_pair(flow_id, request)).second;
-  assert(inserted);
-  (void)inserted;
-  scheduleFlowCreditScheduler();
-}
-
-void NICCreditQueue::scheduleFlowCreditScheduler() {
-  if (!_rx_hop_prio || _materialized_flow_credit ||
-      _rx_credit_requests.empty()) {
-    return;
-  }
-
-  // A live Flow keeps its grant across its normal Credit pacing interval.  Do
-  // not let another pending Flow consume the grant merely because the active
-  // Flow's next paced request has not fired yet.
-  if (_active_credit_flow != NULL && _active_quantum_remaining > 0 &&
-      !_active_credit_flow->_src->_finished &&
-      _rx_credit_requests.find(_active_credit_flow->flow_id()) ==
-          _rx_credit_requests.end()) {
-    return;
-  }
-
-  updateAvailCredit();
-  simtime_picosec when = eventlist().now();
-  if (_avail_cred == 0) {
-    simtime_picosec spacing = _ps_per_byte * _data_size;
-    assert(spacing > cred_tx_delta());
-    when += spacing - cred_tx_delta();
-  }
-  _flow_scheduler.schedule(when);
-}
-
-int NICCreditQueue::computeRequestRoute(RxCreditFlowRequest& request,
-                                        int slice) {
-  XPassSrc* src = request.sink->_src;
-  int src_tor = _top->get_firstToR(src->get_flow_dst());
-  int dst_tor = _top->get_firstToR(src->get_flow_src());
-
-  request.route_slice = slice;
-  request.path_index = 0;
-  request.current_hops = 0;
-  if (src_tor == dst_tor) return 0;
-
-  int npaths = _top->get_no_paths(src_tor, dst_tor, slice);
-  if (npaths == 0) {
-    cout << "Error: there were no credit paths for slice " << slice
-         << " src " << src_tor << " dst " << dst_tor << endl;
-  }
-  assert(npaths > 0);
-  request.path_index = fast_rand() % npaths;
-  request.current_hops = _top->get_no_hops(
-      src_tor, dst_tor, slice, request.path_index);
-  return request.current_hops;
-}
-
-void NICCreditQueue::runFlowCreditScheduler() {
-  assert(_rx_hop_prio);
-  if (_materialized_flow_credit || _rx_credit_requests.empty()) return;
-
-  if (_active_credit_flow != NULL && _active_credit_flow->_src->_finished) {
-    _active_credit_flow = NULL;
-    _active_quantum_remaining = 0;
-  }
-
-  updateAvailCredit();
-  if (_avail_cred == 0) {
-    scheduleFlowCreditScheduler();
-    return;
-  }
-
-  int slice = _top->time_to_slice(eventlist().now());
-  map<uint32_t, RxCreditFlowRequest>::iterator selected =
-      _rx_credit_requests.end();
-  map<uint32_t, RxCreditFlowRequest>::iterator shortest =
-      _rx_credit_requests.end();
-  map<uint32_t, RxCreditFlowRequest>::iterator fifo_first =
-      _rx_credit_requests.end();
-
-  for (map<uint32_t, RxCreditFlowRequest>::iterator it =
-           _rx_credit_requests.begin();
-       it != _rx_credit_requests.end();) {
-    if (it->second.sink->_src->_finished) {
-      if (_active_credit_flow == it->second.sink) {
-        _active_credit_flow = NULL;
-        _active_quantum_remaining = 0;
-      }
-      it->second.pending = false;
-      it->second.sink->_credit_request_pending = false;
-      it = _rx_credit_requests.erase(it);
-      continue;
-    }
-
-    assert(it->second.pending);
-    computeRequestRoute(it->second, slice);
-    if (fifo_first == _rx_credit_requests.end() ||
-        it->second.request_sequence < fifo_first->second.request_sequence) {
-      fifo_first = it;
-    }
-    if (shortest == _rx_credit_requests.end() ||
-        it->second.current_hops < shortest->second.current_hops ||
-        (it->second.current_hops == shortest->second.current_hops &&
-         it->second.request_sequence < shortest->second.request_sequence)) {
-      shortest = it;
-    }
-    ++it;
-  }
-
-  if (shortest == _rx_credit_requests.end()) return;
-  assert(fifo_first != _rx_credit_requests.end());
-
-  bool continued_quantum = false;
-  if (_active_credit_flow != NULL && _active_quantum_remaining > 0) {
-    map<uint32_t, RxCreditFlowRequest>::iterator active =
-        _rx_credit_requests.find(_active_credit_flow->flow_id());
-    if (active != _rx_credit_requests.end()) {
-      selected = active;
-      continued_quantum = true;
-    } else {
-      // The active Flow is still within its normal pacing interval.  Its next
-      // request will schedule the NIC when it becomes ready.
-      assert(!_active_credit_flow->_src->_finished);
-      return;
-    }
-  }
-  if (selected == _rx_credit_requests.end()) {
-    selected = shortest;
-    _active_credit_flow = selected->second.sink;
-    _active_quantum_remaining = _flow_credit_quantum;
-  }
-  assert(_active_credit_flow == selected->second.sink);
-  assert(_active_quantum_remaining > 0);
-
-  cout << "FlowCreditScheduler " << eventlist().now() << " " << slice << " "
-       << selected->first << " " << selected->second.current_hops << " "
-       << fifo_first->first << " " << fifo_first->second.current_hops << " "
-       << _rx_credit_requests.size() << " " << shortest->first << " "
-       << shortest->second.current_hops << " "
-       << _active_quantum_remaining << " " << continued_quantum << endl;
-
-  XPassSink* sink = selected->second.sink;
-  int path_index = selected->second.path_index;
-  int hops = selected->second.current_hops;
-  selected->second.pending = false;
-  _rx_credit_requests.erase(selected);
-  sink->_credit_request_pending = false;
-  sink->setScheduledCreditRoute(slice, path_index, hops);
-
-  mem_b queued_before = queuesize_cred();
-  _materialized_flow_credit = true;
-  sink->emitCredit();
-  // emitCredit schedules this Flow's next paced request. Once the quantum is
-  // exhausted, that request competes normally with every other pending Flow.
-  _active_quantum_remaining--;
-  if (_active_quantum_remaining == 0) _active_credit_flow = NULL;
-
-  // Admission is synchronous. With one materialized Credit the NIC queue
-  // should accept it, but a zero-sized experimental queue can still reject it.
-  if (queuesize_cred() == queued_before) {
-    _materialized_flow_credit = false;
-    scheduleFlowCreditScheduler();
-  }
-}
-
 NICCreditQueue::NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize,
                                EventList &eventlist, QueueLogger *logger,
                                DynExpTopology *top, mem_b credsize,
                                mem_b shaping_thresh, mem_b aeolus_thresh,
                                mem_b tent_thresh, bool rx_hop_prio,
-                               uint32_t flow_credit_quantum)
+                               uint32_t high_weight,
+                               uint32_t medium_weight,
+                               uint32_t low_weight)
     : CreditQueue(bitrate, maxsize, eventlist, logger, 0, 0, top, credsize,
-                  shaping_thresh, aeolus_thresh, tent_thresh),
-      _rx_hop_prio(rx_hop_prio),
-      _materialized_flow_credit(false),
-      _next_request_sequence(0),
-      _flow_credit_quantum(flow_credit_quantum),
-      _active_quantum_remaining(0),
-      _active_credit_flow(NULL),
-      _flow_scheduler(eventlist, this) {
-  assert(_flow_credit_quantum > 0);
+                  shaping_thresh, aeolus_thresh, tent_thresh) {
+  assert(high_weight > 0 && medium_weight > 0 && low_weight > 0);
   _is_nic = true;
+  _rx_hop_prio = rx_hop_prio;
+  _credit_weights = {high_weight, medium_weight, low_weight};
+  _wrr_priority = 0;
+  _wrr_remaining = _credit_weights[0];
 }
 
 void NICCreditQueue::completeService() {
   // cout << nodename() << " completeService " << eventlist().now() << endl;
   /* dequeue the packet */
   Packet *pkt = NULL;
-  bool completed_flow_credit = false;
   if (_tx_next == CRED) {
     int prio = _next_prio;
-    assert(_next_prio >= 0);
+    assert(_next_prio >= 0 && _next_prio < CRED_Q_N);
     // cout << "creditq completeService\n";
     assert(queuesize_cred(prio) > 0);
     pkt = _enqueued_cred[prio].back();
     _enqueued_cred[prio].pop_back();
-    completed_flow_credit = _rx_hop_prio;
-    if (completed_flow_credit) assert(_materialized_flow_credit);
     updatePktOut(pkt->flow_id());
     _queuesize_cred[prio] -= pkt->size();
     _tx_creds++;
+    if (_rx_hop_prio) _priority_transmissions[prio]++;
+    advanceCreditPriority(prio);
     flowCreditCounters(*pkt).queue_transmissions++;
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
     _last_cred_tx_t = eventlist().now();
-    updatePktOut(pkt->flow_id());
     // cout << nodename() << " completeService credit " << eventlist().now() <<
     // " dist " << eventlist().now()-_last_cred_tx_t << endl;
     _last_cred_tx_t = eventlist().now();
@@ -894,8 +796,8 @@ void NICCreditQueue::completeService() {
     // randomly choose a path for the packet
     // !!! todo: add other options like permutation, etc...
     int path_index;
-    // A scheduled Credit already carries the route used for its hop priority.
-    // Reuse it only if NIC serialization did not cross a routing slice.
+    // A prioritized Credit carries the arrival-time route used to classify
+    // it. Reuse that route only if NIC waiting did not cross a slice.
     if (_rx_hop_prio && pkt->type() == XPCREDIT &&
         pkt->get_slice_sent() == slice) {
       path_index = pkt->get_path_index();
@@ -929,10 +831,6 @@ void NICCreditQueue::completeService() {
   sendFromQueue(pkt);
   _next_sched_tx = NO_PENDING_TX;
   _tx_next = NONE;
-  if (completed_flow_credit) {
-    _materialized_flow_credit = false;
-    scheduleFlowCreditScheduler();
-  }
   /* schedule the next dequeue event */
   if (!(_enqueued.empty() && queuesize_cred() == 0)) {
     beginService();

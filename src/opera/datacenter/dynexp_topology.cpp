@@ -215,16 +215,21 @@ RlbModule* DynExpTopology::alloc_rlb_module(DynExpTopology* top, int node) {
 Queue* DynExpTopology::alloc_src_queue(DynExpTopology* top, QueueLogger* queueLogger, int node) {
   if(qt==CREDIT) {
     bool rx_hop_prio = false;
-    uint32_t rx_hop_quantum = 16;
+    uint32_t high_weight = 4;
+    uint32_t medium_weight = 2;
+    uint32_t low_weight = 1;
     map<string,uint64_t>::const_iterator prio_it =
         _params.find("rx_hop_prio");
     if (prio_it != _params.end()) rx_hop_prio = prio_it->second != 0;
-    map<string,uint64_t>::const_iterator quantum_it =
-        _params.find("rx_hop_quantum");
-    if (quantum_it != _params.end()) rx_hop_quantum = quantum_it->second;
+    if (_params.count("rx_hop_weight_high"))
+        high_weight = _params["rx_hop_weight_high"];
+    if (_params.count("rx_hop_weight_medium"))
+        medium_weight = _params["rx_hop_weight_medium"];
+    if (_params.count("rx_hop_weight_low"))
+        low_weight = _params["rx_hop_weight_low"];
     return new NICCreditQueue(speedFromMbps((uint64_t)HOST_NIC), memFromPkt(FEEDER_BUFFER), *eventlist, queueLogger, this, _params["cq_size"], _params["sh_thresh"], 
     _params["ae_thresh"], _params["te_thresh"],
-    rx_hop_prio, rx_hop_quantum);
+    rx_hop_prio, high_weight, medium_weight, low_weight);
   }
   if(qt==HBH) {
     return new HbHNICQueue(speedFromMbps((uint64_t)HOST_NIC), memFromPkt(FEEDER_BUFFER), *eventlist, queueLogger, node, this, _params["hbh_D"], _params["hbh_P"]);

@@ -173,8 +173,8 @@ class TwoHostAllToAllExperimentTest(unittest.TestCase):
         self.assertIn("--fanout COUNT", run_script)
         self.assertIn("--spread-superslices N", run_script)
         self.assertIn("cycle_spread|staggered|synchronized", run_script)
-        self.assertIn("RX_HOP_QUANTUM=16", run_script)
-        self.assertIn("priority_args=(-rxhopprio -rxhopquantum", run_script)
+        self.assertIn("RX_HOP_WEIGHTS=4:2:1", run_script)
+        self.assertIn("priority_args=(-rxhopprio -rxhopweights", run_script)
         self.assertIn("run_case fifo", run_script)
         self.assertIn("run_case rxhopprio", run_script)
 

@@ -27,7 +27,6 @@
 #define DEFAULT_RTO_MIN 5000
 
 class XPassSink;
-class NICCreditQueue;
 
 class XPassSrc : public PacketSink, public EventSource {
     friend class XPassSink;
@@ -152,7 +151,6 @@ class XPassSrc : public PacketSink, public EventSource {
 
 class XPassSink : public PacketSink, public EventSource, public DataReceiver {
     friend class XPassSrc;
-    friend class NICCreditQueue;
  public:
     XPassSink(EventList &eventlist); 
 
@@ -193,7 +191,6 @@ class XPassSink : public PacketSink, public EventSource, public DataReceiver {
     simtime_picosec nextCreditWait();
     void updateSliceFeedbackState();
     XPassPull* emitCredit();
-    void setScheduledCreditRoute(int slice, int path_index, int hops);
     void updateRTT(simtime_picosec ts);
     void feedbackControl();
     void feedbackControl2();
@@ -264,13 +261,6 @@ class XPassSink : public PacketSink, public EventSource, public DataReceiver {
     bool _is_flare;
     bool _is_pulling;
     bool _is_recovering;
-    NICCreditQueue* _receiver_credit_queue;
-    bool _flow_credit_scheduler_enabled;
-    bool _credit_request_pending;
-    bool _scheduled_credit_route_valid;
-    int _scheduled_credit_slice;
-    int _scheduled_credit_path_index;
-    int _scheduled_credit_hops;
 };
 
 class XPassRtxTimerScanner : public EventSource {

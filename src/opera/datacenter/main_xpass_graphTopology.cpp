@@ -58,10 +58,13 @@ void report_credit_stats(GraphTopology* top) {
          << "dropped overflow timeout shaping tentative shaping_checks "
          << "shaping_admitted" << endl;
     cout << "# DataQueueStats scope id port dropped" << endl;
+    cout << "# CreditPriorityStats scope id port priority weight arrivals "
+         << "transmitted queued max_queued dropped pushouts" << endl;
     for (int host = 0; host < top->no_of_nodes(); host++) {
         CreditQueue* queue = dynamic_cast<CreditQueue*>(top->get_queue_serv_tor(host));
         assert(queue);
         queue->reportCreditStats("host", host, -1);
+        queue->reportPriorityStats("host", host, -1);
         cout << "DataQueueStats host " << host << " -1 "
              << queue->num_drops() << endl;
     }
