@@ -37,11 +37,23 @@ struct FlowCreditCounters {
     uint32_t path_hops_min = 0;
     uint32_t path_hops_max = 0;
     uint64_t path_hops_sum = 0;
+    uint64_t admitted = 0;
+    uint64_t endpoint_dropped = 0;
+    uint64_t path_dropped = 0;
+    uint32_t admitted_path_hops_min = 0;
+    uint32_t admitted_path_hops_max = 0;
+    uint64_t admitted_path_hops_sum = 0;
+    uint32_t delivered_path_hops_min = 0;
+    uint32_t delivered_path_hops_max = 0;
+    uint64_t delivered_path_hops_sum = 0;
+    uint64_t delivered_actual_hops_sum = 0;
+    uint64_t delivered_hop_mismatches = 0;
 };
 
 void reportFlowCreditStats();
-void recordFlowCreditTopologyDrop(
-    Packet& pkt, uint32_t consumed_hops, bool undo_delivery = false);
+void reportCreditHopStats();
+void recordFlowCreditDelivery(Packet& pkt);
+void recordFlowCreditTopologyDrop(Packet& pkt, uint32_t consumed_hops);
 
 class CreditQueue : public Queue {
  public:
@@ -113,7 +125,8 @@ class NICCreditQueue : public CreditQueue {
     NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize, EventList &eventlist,
 		QueueLogger* logger, DynExpTopology *top,
         mem_b credsize, mem_b shaping_thresh, mem_b aeolus_thresh,
-        mem_b tent_thresh, bool rx_hop_prio = false);
+        mem_b tent_thresh, bool rx_hop_prio = false,
+        uint32_t flow_credit_quantum = 16);
     bool flowCreditSchedulingEnabled() const { return _rx_hop_prio; }
     void requestCredit(XPassSink* sink);
     void completeService();
@@ -135,6 +148,9 @@ class NICCreditQueue : public CreditQueue {
     bool _rx_hop_prio;
     bool _materialized_flow_credit;
     uint64_t _next_request_sequence;
+    uint32_t _flow_credit_quantum;
+    uint32_t _active_quantum_remaining;
+    XPassSink* _active_credit_flow;
     map<uint32_t, RxCreditFlowRequest> _rx_credit_requests;
     RxCreditFlowScheduler _flow_scheduler;
 };

@@ -5,6 +5,7 @@ import argparse
 import csv
 import math
 import statistics
+from collections import defaultdict
 from pathlib import Path
 
 
@@ -35,6 +36,36 @@ FLOW_CREDIT_FIELDS = (
     "shaping_checks",
     "shaping_admitted",
     "waste_hops",
+)
+FLOW_CREDIT_EXTRA_FIELDS = (
+    "topology",
+    "path_hops_min",
+    "path_hops_max",
+    "path_hops_sum",
+)
+FLOW_CREDIT_LIFECYCLE_FIELDS = (
+    "admitted",
+    "endpoint_dropped",
+    "path_dropped",
+    "admitted_path_hops_min",
+    "admitted_path_hops_max",
+    "admitted_path_hops_sum",
+    "delivered_path_hops_min",
+    "delivered_path_hops_max",
+    "delivered_path_hops_sum",
+    "delivered_actual_hops_sum",
+    "delivered_hop_mismatches",
+)
+CREDIT_HOP_FIELDS = (
+    "hops",
+    "credit_type",
+    "generated",
+    "admitted",
+    "delivered",
+    "endpoint_dropped",
+    "path_dropped",
+    "delivered_actual_hops",
+    "delivered_hop_mismatches",
 )
 FLOW_CLASSES = {
     (3, 12): ("short", 1),
@@ -103,6 +134,7 @@ def parse_log(path):
     fcts = {}
     data_queue_drops = 0
     topology_losses = 0
+    credit_hop_stats = []
     with path.open(encoding="utf-8", errors="replace") as stream:
         for line in stream:
             fields = line.split()
@@ -159,10 +191,59 @@ def parse_log(path):
                         for name, value in zip(FLOW_CREDIT_FIELDS, fields[5:17])
                     }
                 )
+                if len(fields) >= 21:
+                    record.update(
+                        {
+                            name: int(value)
+                            for name, value in zip(
+                                FLOW_CREDIT_EXTRA_FIELDS, fields[17:21]
+                            )
+                        }
+                    )
+                else:
+                    record.update({name: 0 for name in FLOW_CREDIT_EXTRA_FIELDS})
+                if len(fields) >= 32:
+                    record.update(
+                        {
+                            name: int(value)
+                            for name, value in zip(
+                                FLOW_CREDIT_LIFECYCLE_FIELDS, fields[21:32]
+                            )
+                        }
+                    )
+                else:
+                    record.update({name: 0 for name in FLOW_CREDIT_LIFECYCLE_FIELDS})
                 flow_credits[flow_id] = record
+            elif fields[0] == "CreditHopStats" and len(fields) >= 8:
+                hops = int(fields[1])
+                delivered = int(fields[5])
+                credit_hop_stats.append(
+                    {
+                        "hops": hops,
+                        "credit_type": fields[2],
+                        "generated": int(fields[3]),
+                        "admitted": int(fields[4]),
+                        "delivered": delivered,
+                        "endpoint_dropped": int(fields[6]),
+                        "path_dropped": int(fields[7]),
+                        "delivered_actual_hops": (
+                            int(fields[8]) if len(fields) >= 9 else delivered * hops
+                        ),
+                        "delivered_hop_mismatches": (
+                            int(fields[9]) if len(fields) >= 10 else 0
+                        ),
+                    }
+                )
     if not queue_rows:
         raise RuntimeError(f"{path} has no final CreditStats records")
-    return queue_rows, flow_credits, fcts, data_queue_drops, topology_losses
+    return (
+        queue_rows,
+        flow_credits,
+        fcts,
+        data_queue_drops,
+        topology_losses,
+        credit_hop_stats,
+    )
 
 
 def build_flow_rows(case, trace, flow_credits, fcts):
@@ -196,8 +277,22 @@ def build_flow_rows(case, trace, flow_credits, fcts):
                 "total_packet_hops": fct.get("total_packet_hops", ""),
             }
         )
-        for name in FLOW_CREDIT_FIELDS:
+        for name in (
+            *FLOW_CREDIT_FIELDS,
+            *FLOW_CREDIT_EXTRA_FIELDS,
+            *FLOW_CREDIT_LIFECYCLE_FIELDS,
+        ):
             row[name] = credit.get(name, 0)
+        row["mean_admitted_credit_path_hops"] = (
+            row["admitted_path_hops_sum"] / row["admitted"]
+            if row["admitted"]
+            else ""
+        )
+        row["mean_delivered_credit_path_hops"] = (
+            row["delivered_path_hops_sum"] / row["delivered"]
+            if row["delivered"]
+            else ""
+        )
         row["credit_drop_ratio"] = (
             row["dropped"] / row["generated"] if row["generated"] else 0.0
         )
@@ -215,6 +310,7 @@ def summarize(rows, case, flow_class, simtime_s, data_drops="", topology_losses=
     fcts = [row["fct_ms"] for row in completed]
     goodputs = [row["flow_goodput_gbps"] for row in completed]
     generated = sum(row["generated"] for row in selected)
+    admitted = sum(row["admitted"] for row in selected)
     delivered = sum(row["delivered"] for row in selected)
     dropped = sum(row["dropped"] for row in selected)
     waste_hops = sum(row["waste_hops"] for row in selected)
@@ -246,7 +342,26 @@ def summarize(rows, case, flow_class, simtime_s, data_drops="", topology_losses=
         "p99_fct_ms": percentile(fcts, 0.99),
         "max_fct_ms": max(fcts) if fcts else "",
         "generated_credits": generated,
+        "admitted_credits": admitted,
         "delivered_credits": delivered,
+        "mean_admitted_credit_path_hops": (
+            sum(row["admitted_path_hops_sum"] for row in selected) / admitted
+            if admitted
+            else ""
+        ),
+        "mean_delivered_credit_path_hops": (
+            sum(row["delivered_path_hops_sum"] for row in selected) / delivered
+            if delivered
+            else ""
+        ),
+        "delivered_credit_hops": sum(
+            row["delivered_actual_hops_sum"] for row in selected
+        ),
+        "delivered_credit_link_bytes": sum(
+            row["delivered_actual_hops_sum"] for row in selected
+        )
+        * 64,
+        "admitted_credit_delivery_ratio": delivered / admitted if admitted else 0.0,
         "credit_delivery_ratio": delivered / generated if generated else 0.0,
         "credit_drops": dropped,
         "credit_drop_ratio": dropped / generated if generated else 0.0,
@@ -275,6 +390,36 @@ def write_csv(path, rows, fieldnames=None):
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def build_credit_hop_rows(case, raw):
+    grouped = defaultdict(lambda: defaultdict(int))
+    for record in raw:
+        for credit_type in (record["credit_type"], "all"):
+            for field in CREDIT_HOP_FIELDS[2:]:
+                grouped[(record["hops"], credit_type)][field] += record[field]
+
+    rows = []
+    type_order = {"all": 0, "regular": 1, "tentative": 2}
+    for (hops, credit_type), counters in sorted(
+        grouped.items(), key=lambda item: (item[0][0], type_order[item[0][1]])
+    ):
+        admitted = counters["admitted"]
+        delivered = counters["delivered"]
+        path_dropped = counters["path_dropped"]
+        rows.append(
+            {
+                "case": case,
+                "hops": hops,
+                "credit_type": credit_type,
+                **counters,
+                "pending_in_network": admitted - delivered - path_dropped,
+                "path_delivery_ratio": delivered / admitted if admitted else 0.0,
+                "path_drop_ratio": path_dropped / admitted if admitted else 0.0,
+                "delivered_link_bytes": counters["delivered_actual_hops"] * 64,
+            }
+        )
+    return rows
 
 
 def pct_change(value, baseline):
@@ -322,13 +467,22 @@ def main():
     all_queues = []
     summaries = []
     receiver_rows = []
+    all_credit_hops = []
     for case in args.cases:
         trace_path = args.results / "traffic" / f"{case}.htsim"
         log_path = args.results / f"{case}.log"
         if not trace_path.is_file() or not log_path.is_file():
             parser.error(f"missing trace or log for case {case}")
         trace = parse_trace(trace_path)
-        queues, flow_credits, fcts, data_drops, topology_losses = parse_log(log_path)
+        (
+            queues,
+            flow_credits,
+            fcts,
+            data_drops,
+            topology_losses,
+            credit_hop_stats,
+        ) = parse_log(log_path)
+        all_credit_hops.extend(build_credit_hop_rows(case, credit_hop_stats))
         flow_rows = build_flow_rows(case, trace, flow_credits, fcts)
         all_flows.extend(flow_rows)
         for queue in queues:
@@ -353,6 +507,18 @@ def main():
     write_csv(args.results / "summary.csv", summaries)
     write_csv(args.results / "per_receiver.csv", receiver_rows)
     write_csv(args.results / "per_flow.csv", all_flows)
+    write_csv(
+        args.results / "per_credit_hop.csv",
+        all_credit_hops,
+        [
+            "case",
+            *CREDIT_HOP_FIELDS,
+            "pending_in_network",
+            "path_delivery_ratio",
+            "path_drop_ratio",
+            "delivered_link_bytes",
+        ],
+    )
     write_csv(
         args.results / "per_queue.csv",
         all_queues,
@@ -383,6 +549,7 @@ def main():
             f"{goodput if goodput != '' else float('nan'):.3f}"
         )
     print(f"Wrote {args.results / 'summary.csv'}")
+    print(f"Wrote {args.results / 'per_credit_hop.csv'}")
     if wrote_comparison:
         print(f"Wrote {args.results / 'order_comparison.csv'}")
 

@@ -132,7 +132,7 @@ void Queue::sendFromQueue(Packet* pkt) {
                     case XPCREDIT:
                         __global_topology_wrong_dst_credits++;
                         recordFlowCreditTopologyDrop(
-                            *pkt, max(pkt->get_crthop(), 0), true);
+                            *pkt, max(pkt->get_crthop(), 0));
                         cout << "!!! XPCREDIT";
                         break;
                     case XPCTL:

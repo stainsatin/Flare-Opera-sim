@@ -144,7 +144,9 @@ class MultiBottleneckExperimentTest(unittest.TestCase):
             )
 
             trace = ANALYZER.parse_trace(trace_path)
-            queues, credits, fcts, data_drops, losses = ANALYZER.parse_log(log_path)
+            queues, credits, fcts, data_drops, losses, hop_stats = (
+                ANALYZER.parse_log(log_path)
+            )
             rows = ANALYZER.build_flow_rows("short_first", trace, credits, fcts)
             short = ANALYZER.summarize(rows, "short_first", "short", 0.01)
             long = ANALYZER.summarize(rows, "short_first", "long", 0.01)
@@ -152,6 +154,7 @@ class MultiBottleneckExperimentTest(unittest.TestCase):
             self.assertEqual(len(queues), 2)
             self.assertEqual(data_drops, 0)
             self.assertEqual(losses, 0)
+            self.assertEqual(hop_stats, [])
             self.assertEqual(short["completed_flows"], 1)
             self.assertAlmostEqual(short["mean_fct_ms"], 0.1)
             self.assertAlmostEqual(short["mean_flow_goodput_gbps"], 80.0)

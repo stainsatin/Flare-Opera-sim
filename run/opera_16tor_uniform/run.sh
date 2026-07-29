@@ -21,6 +21,7 @@ OUTPUT_DIR="${SCRIPT_DIR}/results_32MiB_cycle_spread"
 BUILD=auto
 SHAPING_ENABLED=yes
 RX_HOP_PRIO=no
+RX_HOP_QUANTUM=16
 
 usage() {
     cat <<'EOF'
@@ -41,6 +42,7 @@ Options:
   --topology FILE           Dynamic Opera topology (default: 55 us superslices)
   --no-shaping              Disable probabilistic admission shaping
   --rxhopprio               Host-level pre-generation shortest-path Flow scheduling
+  --rxhop-quantum CREDITS   Credits served per selected Flow (default: 16)
   --output DIR              Result directory
   --build                   Always build the dynamic Opera executable
   --no-build                Require an existing executable
@@ -70,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         --topology) TOPOLOGY="$2"; shift 2 ;;
         --no-shaping) SHAPING_ENABLED=no; shift ;;
         --rxhopprio) RX_HOP_PRIO=yes; shift ;;
+        --rxhop-quantum) RX_HOP_QUANTUM="$2"; shift 2 ;;
         --output) OUTPUT_DIR="$2"; shift 2 ;;
         --build) BUILD=yes; shift ;;
         --no-build) BUILD=no; shift ;;
@@ -81,6 +84,10 @@ done
 if [[ ! -f "${TOPOLOGY}" ]]; then
     echo "Topology not found: ${TOPOLOGY}" >&2
     exit 1
+fi
+if ! [[ "${RX_HOP_QUANTUM}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--rxhop-quantum must be a positive integer" >&2
+    exit 2
 fi
 
 read -r TOPOLOGY_SLICES EPSILON_PS DELTA_PS RECONFIG_PS < <(sed -n '2p' "${TOPOLOGY}")
@@ -135,8 +142,8 @@ fi
 
 RX_HOP_PRIO_ARGS=()
 if [[ "${RX_HOP_PRIO}" == yes ]]; then
-    RX_HOP_PRIO_ARGS=(-rxhopprio)
-    echo "Receiver host-level Flow-aware Credit generation enabled"
+    RX_HOP_PRIO_ARGS=(-rxhopprio -rxhopquantum "${RX_HOP_QUANTUM}")
+    echo "Receiver host-level Flow-aware Credit generation enabled (quantum=${RX_HOP_QUANTUM})"
 fi
 
 COMMAND=(

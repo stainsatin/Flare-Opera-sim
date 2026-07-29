@@ -2,6 +2,8 @@
 
 This experiment repeats the 8-flow-per-host FIFO versus `-rxhopprio`
 comparison on `topologies/opera_24tor_4host_55us.txt`.
+When `-rxhopprio` is enabled, the selected Flow keeps a configurable Credit
+quantum (16 Credits by default) before all pending Flows compete again.
 
 ## Default workload
 
@@ -42,8 +44,9 @@ Reuse an existing executable on subsequent runs:
 bash run/opera_24tor_8flow_4MiB/run.sh \
   --no-build \
   --scheduler both \
+  --rxhop-quantum 16 \
   --simtime 0.05 \
-  --output run/opera_24tor_8flow_4MiB/results_8x4MiB_hostflow_stagger2
+  --output run/opera_24tor_8flow_4MiB/results_8x4MiB_hostflow_stagger2_q16
 ```
 
 For a quick setup check, run only FIFO with small flows:
@@ -60,7 +63,8 @@ bash run/opera_24tor_8flow_4MiB/run.sh \
 The two cases reuse the exact same traffic trace. The output root contains
 `comparison.csv`; each case contains `summary.csv`, `per_flow.csv`,
 `per_queue.csv`, `per_tor.csv`, `flow_credit_scheduler.csv`, raw simulator
-logs, and the exact command used.
+logs, and the exact command used. `per_credit_hop.csv` reports generated,
+NIC-admitted, and Sender-delivered Credits plus delivery probability by hop.
 
 ## Tests
 

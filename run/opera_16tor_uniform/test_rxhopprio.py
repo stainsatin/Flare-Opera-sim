@@ -41,8 +41,11 @@ class RxHopPriorityContractTest(unittest.TestCase):
 
     def test_command_line_mode_is_opt_in_and_reaches_only_host_nics(self):
         self.assertIn("bool rx_hop_prio = false;", self.main_cpp)
+        self.assertIn("uint32_t rx_hop_quantum = 16;", self.main_cpp)
         self.assertIn('!strcmp(argv[i],"-rxhopprio")', self.main_cpp)
+        self.assertIn('!strcmp(argv[i],"-rxhopquantum")', self.main_cpp)
         self.assertIn('{"rx_hop_prio",rx_hop_prio ? 1U : 0U}', self.main_cpp)
+        self.assertIn('{"rx_hop_quantum",rx_hop_quantum}', self.main_cpp)
         self.assertIn("host-level flow-aware Credit", self.main_cpp)
 
         alloc_src = function_body(
@@ -51,7 +54,9 @@ class RxHopPriorityContractTest(unittest.TestCase):
         alloc_tor = function_body(
             self.topology_cpp, "Queue* DynExpTopology::alloc_queue(QueueLogger* queueLogger, uint64_t"
         )
-        self.assertIn('_params["rx_hop_prio"] != 0', alloc_src)
+        self.assertIn('_params.find("rx_hop_prio")', alloc_src)
+        self.assertIn('_params.find("rx_hop_quantum")', alloc_src)
+        self.assertIn("uint32_t rx_hop_quantum = 16", alloc_src)
         self.assertNotIn("rx_hop_prio", alloc_tor)
 
     def test_generated_credit_queue_is_fifo_again(self):
@@ -141,8 +146,8 @@ class RxHopPriorityContractTest(unittest.TestCase):
         select = function_body(
             self.queue_cpp, "void NICCreditQueue::runFlowCreditScheduler"
         )
-        self.assertIn("current_hops < selected->second.current_hops", select)
-        self.assertIn("request_sequence < selected->second.request_sequence", select)
+        self.assertIn("current_hops < shortest->second.current_hops", select)
+        self.assertIn("request_sequence < shortest->second.request_sequence", select)
         self.assertIn("request_sequence < fifo_first->second.request_sequence", select)
         for unsupported in ("aging", "slo", "flow_size", "wait_time"):
             self.assertNotIn(unsupported, select.lower())
@@ -161,6 +166,40 @@ class RxHopPriorityContractTest(unittest.TestCase):
         self.assertIn("sink->emitCredit()", select)
         self.assertNotIn("sendFromQueue", select)
         self.assertIn("credit_ready()", begin)
+
+    def test_selected_flow_keeps_a_bounded_credit_quantum(self):
+        select = function_body(
+            self.queue_cpp, "void NICCreditQueue::runFlowCreditScheduler"
+        )
+        self.assertIn("_active_credit_flow", self.queue_h)
+        self.assertIn("_active_quantum_remaining", self.queue_h)
+        self.assertIn("_flow_credit_quantum", self.queue_h)
+        self.assertIn("_active_credit_flow->flow_id()", select)
+        self.assertIn("selected = active", select)
+        self.assertIn("_active_quantum_remaining--", select)
+        self.assertIn("_active_credit_flow = NULL", select)
+        self.assertIn("continued_quantum", select)
+
+        schedule = function_body(
+            self.queue_cpp, "void NICCreditQueue::scheduleFlowCreditScheduler"
+        )
+        self.assertIn("_active_credit_flow->_src->_finished", schedule)
+        self.assertIn("_rx_credit_requests.find(_active_credit_flow->flow_id())", schedule)
+        self.assertIn("return;", schedule)
+
+    def test_credit_lifecycle_hops_are_recorded_at_real_boundaries(self):
+        nic_complete = function_body(
+            self.queue_cpp, "void NICCreditQueue::completeService"
+        )
+        source_receive = function_body(
+            self.xpass_cpp, "void XPassSrc::receivePacket"
+        )
+        self.assertIn("recordFlowCreditAdmission(*pkt)", nic_complete)
+        self.assertIn("recordFlowCreditDelivery(pkt)", source_receive)
+        self.assertIn("admitted_path_hops_sum", self.queue_h)
+        self.assertIn("delivered_path_hops_sum", self.queue_h)
+        self.assertIn("reportCreditHopStats", self.queue_cpp)
+        self.assertIn('"per_credit_hop.csv"', self.analyzer)
 
     def test_selected_route_is_attached_and_reused_only_in_same_slice(self):
         send = function_body(self.xpass_cpp, "XPassSink::sendToNIC")
@@ -184,6 +223,10 @@ class RxHopPriorityContractTest(unittest.TestCase):
             "fifo_first_flow",
             "fifo_first_hops",
             "num_pending_flows",
+            "shortest_flow",
+            "shortest_hops",
+            "quantum_remaining_before",
+            "continued_quantum",
         ):
             self.assertIn(f'"{field}"', self.analyzer)
 
@@ -194,7 +237,7 @@ class RxHopPriorityContractTest(unittest.TestCase):
             )
             self.assertIn("RX_HOP_PRIO=no", script)
             self.assertIn("--rxhopprio) RX_HOP_PRIO=yes", script)
-            self.assertIn("RX_HOP_PRIO_ARGS=(-rxhopprio)", script)
+            self.assertIn("RX_HOP_PRIO_ARGS=(-rxhopprio -rxhopquantum", script)
 
 
 if __name__ == "__main__":

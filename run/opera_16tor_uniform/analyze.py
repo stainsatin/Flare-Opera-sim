@@ -42,6 +42,37 @@ FLOW_CREDIT_EXTRA_FIELDS = (
     "path_hops_max",
     "path_hops_sum",
 )
+FLOW_CREDIT_LIFECYCLE_FIELDS = (
+    "admitted",
+    "endpoint_dropped",
+    "path_dropped",
+    "admitted_path_hops_min",
+    "admitted_path_hops_max",
+    "admitted_path_hops_sum",
+    "delivered_path_hops_min",
+    "delivered_path_hops_max",
+    "delivered_path_hops_sum",
+    "delivered_actual_hops_sum",
+    "delivered_hop_mismatches",
+)
+CREDIT_HOP_FIELDS = (
+    "hops",
+    "credit_type",
+    "generated",
+    "admitted",
+    "delivered",
+    "endpoint_dropped",
+    "path_dropped",
+    "delivered_actual_hops",
+    "delivered_hop_mismatches",
+)
+CREDIT_HOP_OUTPUT_FIELDS = (
+    *CREDIT_HOP_FIELDS,
+    "pending_in_network",
+    "path_delivery_ratio",
+    "path_drop_ratio",
+    "delivered_link_bytes",
+)
 MSS_BYTES = 1436
 HOST_RATE_GBPS = 100.0
 FLOW_SCHEDULER_FIELDS = (
@@ -52,6 +83,10 @@ FLOW_SCHEDULER_FIELDS = (
     "fifo_first_flow",
     "fifo_first_hops",
     "num_pending_flows",
+    "shortest_flow",
+    "shortest_hops",
+    "quantum_remaining_before",
+    "continued_quantum",
 )
 
 
@@ -119,6 +154,7 @@ def parse_log(path):
     utilization = []
     input_load = []
     flow_credit_scheduler = []
+    credit_hop_stats = []
     unfinished_markers = set()
     topology_clip = {"credit": 0, "data": 0, "control": 0, "other": 0}
     topology_wrong_dst = {"credit": 0, "data": 0, "control": 0, "other": 0}
@@ -182,7 +218,38 @@ def parse_log(path):
                             ),
                         }
                     )
+                if len(fields) >= 32:
+                    record.update(
+                        {
+                            name: int(value)
+                            for name, value in zip(
+                                FLOW_CREDIT_LIFECYCLE_FIELDS, fields[21:32]
+                            )
+                        }
+                    )
+                else:
+                    record.update({name: 0 for name in FLOW_CREDIT_LIFECYCLE_FIELDS})
                 flow_credits[flow_id] = record
+            elif fields[0] == "CreditHopStats" and len(fields) >= 8:
+                hops = int(fields[1])
+                delivered = int(fields[5])
+                credit_hop_stats.append(
+                    {
+                        "hops": hops,
+                        "credit_type": fields[2],
+                        "generated": int(fields[3]),
+                        "admitted": int(fields[4]),
+                        "delivered": delivered,
+                        "endpoint_dropped": int(fields[6]),
+                        "path_dropped": int(fields[7]),
+                        "delivered_actual_hops": (
+                            int(fields[8]) if len(fields) >= 9 else delivered * hops
+                        ),
+                        "delivered_hop_mismatches": (
+                            int(fields[9]) if len(fields) >= 10 else 0
+                        ),
+                    }
+                )
             elif fields[0] == "FCT" and len(fields) >= 8:
                 flow_id = int(fields[7])
                 fct_ms = float(fields[4])
@@ -203,12 +270,13 @@ def parse_log(path):
             elif fields[0] == "Input" and len(fields) >= 5:
                 input_load.append((float(fields[4]), float(fields[1])))
             elif fields[0] == "FlowCreditScheduler" and len(fields) >= 8:
-                flow_credit_scheduler.append(
-                    {
-                        name: int(value)
-                        for name, value in zip(FLOW_SCHEDULER_FIELDS, fields[1:8])
-                    }
-                )
+                record = {
+                    name: int(value)
+                    for name, value in zip(FLOW_SCHEDULER_FIELDS, fields[1:12])
+                }
+                for name in FLOW_SCHEDULER_FIELDS:
+                    record.setdefault(name, "")
+                flow_credit_scheduler.append(record)
             elif fields[0] == "TopologyClipStats" and len(fields) >= 5:
                 topology_clip = dict(
                     zip(topology_clip, (int(value) for value in fields[1:5]))
@@ -241,6 +309,7 @@ def parse_log(path):
         "utilization": utilization,
         "input_load": input_load,
         "flow_credit_scheduler": flow_credit_scheduler,
+        "credit_hop_stats": credit_hop_stats,
         "unfinished_markers": unfinished_markers,
         "topology_clip": topology_clip,
         "topology_wrong_dst": topology_wrong_dst,
@@ -285,12 +354,32 @@ def build_flow_rows(trace, parsed):
                 "unfinished_marker": flow_id in parsed["unfinished_markers"],
             }
         )
-        for name in (*FLOW_CREDIT_FIELDS, *FLOW_CREDIT_EXTRA_FIELDS):
+        for name in (
+            *FLOW_CREDIT_FIELDS,
+            *FLOW_CREDIT_EXTRA_FIELDS,
+            *FLOW_CREDIT_LIFECYCLE_FIELDS,
+        ):
             row[name] = credit.get(name, 0)
         row["last_credit_path_hops"] = credit.get("last_credit_path_hops", "")
         row["mean_credit_path_hops"] = (
             row["path_hops_sum"] / row["generated"] if row["generated"] else ""
         )
+        row["mean_admitted_credit_path_hops"] = (
+            row["admitted_path_hops_sum"] / row["admitted"]
+            if row["admitted"]
+            else ""
+        )
+        row["mean_delivered_credit_path_hops"] = (
+            row["delivered_path_hops_sum"] / row["delivered"]
+            if row["delivered"]
+            else ""
+        )
+        row["mean_delivered_actual_credit_hops"] = (
+            row["delivered_actual_hops_sum"] / row["delivered"]
+            if row["delivered"]
+            else ""
+        )
+        row["delivered_credit_link_bytes"] = row["delivered_actual_hops_sum"] * 64
         row["credit_drop_ratio"] = (
             row["dropped"] / row["generated"] if row["generated"] else 0.0
         )
@@ -309,6 +398,45 @@ def mean_sample(samples, first_ms, last_ms, aggregate_capacity_gbps):
     )
 
 
+def build_credit_hop_rows(parsed):
+    raw = parsed["credit_hop_stats"]
+    if not raw:
+        return []
+
+    # Per-hop success uses the actual route installed when the Credit leaves
+    # the NIC. Generated counts may use an earlier selected route if NIC wait
+    # crosses a routing-slice boundary, so no per-hop admission ratio is made.
+    grouped = defaultdict(lambda: defaultdict(int))
+    for record in raw:
+        key = (record["hops"], record["credit_type"])
+        for field in CREDIT_HOP_FIELDS[2:]:
+            grouped[key][field] += record[field]
+            grouped[(record["hops"], "all")][field] += record[field]
+
+    rows = []
+    type_order = {"all": 0, "regular": 1, "tentative": 2}
+    for (hops, credit_type), counters in sorted(
+        grouped.items(), key=lambda item: (item[0][0], type_order[item[0][1]])
+    ):
+        generated = counters["generated"]
+        admitted = counters["admitted"]
+        delivered = counters["delivered"]
+        endpoint_dropped = counters["endpoint_dropped"]
+        path_dropped = counters["path_dropped"]
+        rows.append(
+            {
+                "hops": hops,
+                "credit_type": credit_type,
+                **counters,
+                "pending_in_network": admitted - delivered - path_dropped,
+                "path_delivery_ratio": delivered / admitted if admitted else 0.0,
+                "path_drop_ratio": path_dropped / admitted if admitted else 0.0,
+                "delivered_link_bytes": counters["delivered_actual_hops"] * 64,
+            }
+        )
+    return rows
+
+
 def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle_us):
     completed = [row for row in flow_rows if row["completed"]]
     fcts = [row["fct_ms"] for row in completed]
@@ -320,6 +448,7 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
     makespan_ms = max(last_finish_ms - first_start_ms, 0.0)
     completed_bytes = sum(row["bytes"] for row in completed)
     generated = sum(row["generated"] for row in flow_rows)
+    admitted = sum(row["admitted"] for row in flow_rows)
     delivered = sum(row["delivered"] for row in flow_rows)
     dropped = sum(row["dropped"] for row in flow_rows)
     topology_credit_drops = sum(row["topology"] for row in flow_rows)
@@ -329,6 +458,10 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
     host_transmitted = sum(row["transmitted"] for row in host_queues)
     tor_queue_drops = sum(row["dropped"] for row in tor_queues)
     aggregate_capacity_gbps = len(host_queues) * HOST_RATE_GBPS
+    scheduler_rows = parsed.get("flow_credit_scheduler", [])
+    scheduler_rows_with_quantum = [
+        row for row in scheduler_rows if row.get("continued_quantum", "") != ""
+    ]
 
     tor_active_goodputs = []
     for tor in sorted({row["source_tor"] for row in flow_rows}):
@@ -385,6 +518,25 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         "max_fct_ms": max(fcts) if fcts else "",
         "flow_goodput_jain": jain_fairness(goodputs),
         "tor_goodput_jain": jain_fairness(tor_active_goodputs),
+        "flow_scheduler_grants": len(scheduler_rows),
+        "continued_quantum_grants": sum(
+            row["continued_quantum"] for row in scheduler_rows_with_quantum
+        ),
+        "continued_quantum_ratio": (
+            sum(row["continued_quantum"] for row in scheduler_rows_with_quantum)
+            / len(scheduler_rows_with_quantum)
+            if scheduler_rows_with_quantum
+            else ""
+        ),
+        "shortest_flow_selection_ratio": (
+            sum(
+                row["selected_flow"] == row["shortest_flow"]
+                for row in scheduler_rows_with_quantum
+            )
+            / len(scheduler_rows_with_quantum)
+            if scheduler_rows_with_quantum
+            else ""
+        ),
         "mean_credit_path_hops": (
             sum(row["path_hops_sum"] for row in flow_rows) / generated
             if generated
@@ -396,15 +548,74 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         "max_credit_path_hops": max(
             (row["path_hops_max"] for row in flow_rows if row["generated"]), default=""
         ),
+        "mean_admitted_credit_path_hops": (
+            sum(row["admitted_path_hops_sum"] for row in flow_rows) / admitted
+            if admitted
+            else ""
+        ),
+        "min_admitted_credit_path_hops": min(
+            (
+                row["admitted_path_hops_min"]
+                for row in flow_rows
+                if row["admitted"]
+            ),
+            default="",
+        ),
+        "max_admitted_credit_path_hops": max(
+            (
+                row["admitted_path_hops_max"]
+                for row in flow_rows
+                if row["admitted"]
+            ),
+            default="",
+        ),
+        "mean_delivered_credit_path_hops": (
+            sum(row["delivered_path_hops_sum"] for row in flow_rows) / delivered
+            if delivered
+            else ""
+        ),
+        "mean_delivered_actual_credit_hops": (
+            sum(row["delivered_actual_hops_sum"] for row in flow_rows) / delivered
+            if delivered
+            else ""
+        ),
+        "delivered_routed_credit_hops": sum(
+            row["delivered_path_hops_sum"] for row in flow_rows
+        ),
+        "delivered_credit_hops": sum(
+            row["delivered_actual_hops_sum"] for row in flow_rows
+        ),
+        "delivered_credit_link_bytes": sum(
+            row["delivered_actual_hops_sum"] for row in flow_rows
+        )
+        * 64,
+        "delivered_credit_hop_mismatches": sum(
+            row["delivered_hop_mismatches"] for row in flow_rows
+        ),
         "generated_credits": generated,
+        "admitted_credits": admitted,
         "credits_left_endpoints": host_transmitted,
+        "admitted_counter_difference": admitted - host_transmitted,
         "delivered_credits": delivered,
         "credit_drops": dropped,
         "credit_drop_ratio": dropped / generated if generated else 0.0,
         "residual_or_unaccounted_credits": generated - delivered - dropped,
         "endpoint_credit_drops": sum(row["dropped"] for row in host_queues),
+        "flow_endpoint_credit_drops": sum(
+            row["endpoint_dropped"] for row in flow_rows
+        ),
+        "endpoint_drop_counter_difference": sum(
+            row["endpoint_dropped"] for row in flow_rows
+        )
+        - sum(row["dropped"] for row in host_queues),
         "tor_queue_credit_drops": tor_queue_drops,
         "topology_credit_drops": topology_credit_drops,
+        "flow_path_credit_drops": sum(row["path_dropped"] for row in flow_rows),
+        "path_drop_counter_difference": sum(
+            row["path_dropped"] for row in flow_rows
+        )
+        - tor_queue_drops
+        - topology_credit_drops,
         "queue_drop_counter_difference": (
             dropped - topology_credit_drops - sum(row["dropped"] for row in queue_rows)
         ),
@@ -417,6 +628,7 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
             else 0.0
         ),
         "credit_delivery_ratio": delivered / generated if generated else 0.0,
+        "admitted_credit_delivery_ratio": delivered / admitted if admitted else 0.0,
         "overflow_credit_drops": sum(row["overflow"] for row in flow_rows),
         "timeout_credit_drops": sum(row["timeout"] for row in flow_rows),
         "shaping_credit_drops": sum(row["shaping"] for row in flow_rows),
@@ -435,6 +647,15 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         "credit_waste_hops_per_generated": (
             sum(row["waste_hops"] for row in flow_rows) / generated if generated else 0.0
         ),
+        "total_credit_network_hops": sum(
+            row["delivered_path_hops_sum"] + row["waste_hops"]
+            for row in flow_rows
+        ),
+        "total_credit_network_link_bytes": sum(
+            row["delivered_path_hops_sum"] + row["waste_hops"]
+            for row in flow_rows
+        )
+        * 64,
         "max_credit_queue_packets": max(
             (row["max_queued"] for row in queue_rows), default=0
         ),
@@ -488,7 +709,20 @@ def build_tor_rows(flow_rows, queue_rows, hosts_per_tor):
                     else ""
                 ),
                 "receiver_generated_credits": sum(row["generated"] for row in incoming),
+                "receiver_admitted_credits": sum(row["admitted"] for row in incoming),
                 "receiver_delivered_credits": sum(row["delivered"] for row in incoming),
+                "receiver_mean_admitted_credit_hops": (
+                    sum(row["admitted_path_hops_sum"] for row in incoming)
+                    / sum(row["admitted"] for row in incoming)
+                    if sum(row["admitted"] for row in incoming)
+                    else ""
+                ),
+                "receiver_mean_delivered_credit_hops": (
+                    sum(row["delivered_path_hops_sum"] for row in incoming)
+                    / sum(row["delivered"] for row in incoming)
+                    if sum(row["delivered"] for row in incoming)
+                    else ""
+                ),
                 "receiver_credit_drops": sum(row["dropped"] for row in incoming),
                 "receiver_credit_drop_ratio": (
                     sum(row["dropped"] for row in incoming)
@@ -579,6 +813,7 @@ def main():
     )
     parsed = parse_log(log_path)
     flow_rows = build_flow_rows(trace, parsed)
+    credit_hop_rows = build_credit_hop_rows(parsed)
     add_queue_labels(parsed["queues"], args.hosts_per_tor)
     summary = build_summary(
         flow_rows,
@@ -594,6 +829,11 @@ def main():
     write_csv(args.results / "per_flow.csv", flow_rows, list(flow_rows[0]))
     write_csv(args.results / "per_queue.csv", parsed["queues"], list(parsed["queues"][0]))
     write_csv(args.results / "per_tor.csv", tor_rows, list(tor_rows[0]))
+    write_csv(
+        args.results / "per_credit_hop.csv",
+        credit_hop_rows,
+        list(CREDIT_HOP_OUTPUT_FIELDS),
+    )
     write_csv(
         args.results / "flow_credit_scheduler.csv",
         parsed["flow_credit_scheduler"],
@@ -617,6 +857,12 @@ def main():
         f"({summary['credit_drop_ratio']:.2%}); "
         f"path conditional={summary['path_conditional_credit_drop_ratio']:.2%}"
     )
+    if summary["continued_quantum_ratio"] != "":
+        print(
+            f"Flow scheduler: grants={summary['flow_scheduler_grants']} "
+            f"continued-quantum={summary['continued_quantum_ratio']:.2%} "
+            f"selected-shortest={summary['shortest_flow_selection_ratio']:.2%}"
+        )
     print(
         f"Known data drops: {summary['known_data_drops']} "
         f"(queue={summary['data_queue_drops']}, "
@@ -627,6 +873,7 @@ def main():
     print(f"Wrote {args.results / 'per_flow.csv'}")
     print(f"Wrote {args.results / 'per_queue.csv'}")
     print(f"Wrote {args.results / 'per_tor.csv'}")
+    print(f"Wrote {args.results / 'per_credit_hop.csv'}")
     print(f"Wrote {args.results / 'flow_credit_scheduler.csv'}")
 
 

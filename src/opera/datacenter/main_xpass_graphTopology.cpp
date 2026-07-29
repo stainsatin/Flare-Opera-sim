@@ -75,6 +75,7 @@ void report_credit_stats(GraphTopology* top) {
         }
     }
     reportFlowCreditStats();
+    reportCreditHopStats();
 }
 
 EventList eventlist;

@@ -69,6 +69,7 @@ void report_credit_stats(DynExpTopology* top) {
         }
     }
     reportFlowCreditStats();
+    reportCreditHopStats();
     cout << "# TopologyClipStats credit data control other" << endl;
     cout << "TopologyClipStats " << __global_topology_clipped_credits << " "
          << __global_topology_clipped_data << " "
@@ -125,6 +126,8 @@ int main(int argc, char **argv) {
     bool fb_sens = false; //weight feedback adjustment with prob function
     bool is_flare = false; //false=flare, true=xpass
     bool rx_hop_prio = false;
+    uint32_t rx_hop_quantum = 16;
+    bool rx_hop_quantum_set = false;
     int jit_a = -1; //jittering K value
     int jit_b = -1; //jittering K value
     double fb_w_factor = 2.0; //weight adjustment factor
@@ -174,6 +177,15 @@ int main(int argc, char **argv) {
 	    is_flare = true;
 	} else if (!strcmp(argv[i],"-rxhopprio")){
 	    rx_hop_prio = true;
+	} else if (!strcmp(argv[i],"-rxhopquantum")){
+        int parsed_quantum = atoi(argv[i+1]);
+        if (parsed_quantum <= 0) {
+            cout << "-rxhopquantum must be greater than zero" << endl;
+            exit(1);
+        }
+        rx_hop_quantum = parsed_quantum;
+        rx_hop_quantum_set = true;
+        i++;
 	} else if (!strcmp(argv[i],"-probfile")) {
 		string probfile = argv[i+1];
         hops_to_prob = read_probfun(probfile);
@@ -210,9 +222,14 @@ int main(int argc, char **argv) {
         cout << "Both -topfile and -flowfile are required" << endl;
         exit(1);
     }
+    if (rx_hop_quantum_set && !rx_hop_prio) {
+        cout << "-rxhopquantum requires -rxhopprio" << endl;
+        exit(1);
+    }
     if (rx_hop_prio) {
         cout << "Receiver hop priority: host-level flow-aware Credit "
-             << "generation (shortest-current-path-first)" << endl;
+             << "generation (shortest-current-path-first, quantum="
+             << rx_hop_quantum << ")" << endl;
     }
 
     eventlist.setEndtime(timeFromSec(simtime));
@@ -240,7 +257,8 @@ int main(int argc, char **argv) {
     map<string,uint64_t> params = 
         {{"cq_size",cred_queuesize},{"sh_thresh",shaping_thresh},
         {"ae_thresh",aeolus_thresh},{"te_thresh",tent_thresh},
-        {"rx_hop_prio",rx_hop_prio ? 1U : 0U}};
+        {"rx_hop_prio",rx_hop_prio ? 1U : 0U},
+        {"rx_hop_quantum",rx_hop_quantum}};
     DynExpTopology* top = new DynExpTopology(queuesize, &logfile, &eventlist, 
         CREDIT, topfile, params);
     top->set_prob_hops(hops_to_prob);

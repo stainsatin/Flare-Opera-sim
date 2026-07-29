@@ -14,13 +14,14 @@ FLOWS_PER_HOST=8
 START_SUPERSLICES=2
 BASE_START_NS=1000
 SCHEDULER=both
+RX_HOP_QUANTUM=16
 CWND=4
 DATA_QUEUE=600
 CREDIT_QUEUE=60
 SHAPING_QUEUE=30
 AEOLUS_QUEUE=40
 TENTATIVE_QUEUE=4
-OUTPUT_ROOT="${SCRIPT_DIR}/results_8x4MiB_hostflow_stagger2"
+OUTPUT_ROOT="${SCRIPT_DIR}/results_8x4MiB_hostflow_stagger2_q16"
 BUILD=auto
 SHAPING_ENABLED=yes
 
@@ -30,6 +31,7 @@ Usage: bash run/opera_108tor_8flow_4MiB/run.sh [options]
 
 Options:
   --scheduler MODE          fifo, rxhopprio, or both (default: both)
+  --rxhop-quantum CREDITS   Credits served per selected Flow (default: 16)
   --flow-size-mib MIB       Size of every flow (default: 4)
   --flows-per-host COUNT    Flows sourced/received per host (default: 8)
   --start-superslices N     Stagger starts over 1 or 2 superslices (default: 2)
@@ -62,6 +64,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --flow-size-mib) FLOW_SIZE_MIB="$2"; shift 2 ;;
+        --rxhop-quantum) RX_HOP_QUANTUM="$2"; shift 2 ;;
         --flows-per-host) FLOWS_PER_HOST="$2"; shift 2 ;;
         --start-superslices) START_SUPERSLICES="$2"; shift 2 ;;
         --base-start-ns) BASE_START_NS="$2"; shift 2 ;;
@@ -87,6 +90,10 @@ done
 if [[ ! -f "${TOPOLOGY}" ]]; then
     echo "Topology not found: ${TOPOLOGY}" >&2
     exit 1
+fi
+if ! [[ "${RX_HOP_QUANTUM}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--rxhop-quantum must be a positive integer" >&2
+    exit 2
 fi
 
 read -r HOSTS HOSTS_PER_TOR UPLINKS TORS < <(sed -n '1p' "${TOPOLOGY}")
@@ -152,7 +159,7 @@ run_case() {
     local case_dir="${OUTPUT_ROOT}/${case_name}"
     local priority_args=()
     if [[ "${case_name}" == rxhopprio ]]; then
-        priority_args=(-rxhopprio)
+        priority_args=(-rxhopprio -rxhopquantum "${RX_HOP_QUANTUM}")
     fi
 
     mkdir -p "${case_dir}/traffic"
@@ -206,6 +213,7 @@ run_case() {
 echo "Topology: ${TORS} ToRs, ${HOSTS_PER_TOR} hosts/ToR, ${HOSTS} hosts"
 echo "Superslice: ${SUPERSLICE_NS} ns; active: ${ACTIVE_WINDOW_NS} ns; cycle: ${CYCLE_NS} ns"
 echo "Workload: ${FLOWS_PER_HOST} x ${FLOW_SIZE_MIB} MiB per host; cwnd=${CWND}"
+echo "Receiver hop-priority Flow quantum: ${RX_HOP_QUANTUM} Credits"
 case "${SCHEDULER}" in
     fifo) run_case fifo ;;
     rxhopprio) run_case rxhopprio ;;

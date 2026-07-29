@@ -87,9 +87,11 @@ class OperaTwentyFourTorExperimentTest(unittest.TestCase):
         self.assertIn("FLOWS_PER_HOST=8", script)
         self.assertIn("START_SUPERSLICES=2", script)
         self.assertIn("CWND=4", script)
+        self.assertIn("results_8x4MiB_hostflow_stagger2_q16", script)
         self.assertIn("run_case fifo", script)
         self.assertIn("run_case rxhopprio", script)
-        self.assertIn("priority_args=(-rxhopprio)", script)
+        self.assertIn("RX_HOP_QUANTUM=16", script)
+        self.assertIn("priority_args=(-rxhopprio -rxhopquantum", script)
         self.assertIn("opera_24tor_4host_55us.txt", script)
         self.assertTrue(
             (ROOT / "topologies" / "opera_24tor_4host_55us.txt").is_file()

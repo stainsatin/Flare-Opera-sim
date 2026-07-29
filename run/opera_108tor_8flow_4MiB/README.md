@@ -4,7 +4,9 @@ This experiment compares the original per-Flow Credit generation with a
 host-level Flow-aware generator (`-rxhopprio`) on the paper reproduction's
 native Opera topology. Before a Credit Packet exists, the receiver NIC selects
 one pending Flow by `(current_path_hops, request_sequence)` and lets only that
-Flow generate one Credit. Generated Credits still use the original NIC FIFO.
+Flow generate Credits. The selected Flow keeps a configurable quantum (16
+Credits by default), then all pending Flows compete again. Generated Credits
+still use the original NIC FIFO.
 
 ## Default workload
 
@@ -49,8 +51,9 @@ Later runs can reuse the executable:
 bash run/opera_108tor_8flow_4MiB/run.sh \
   --no-build \
   --scheduler both \
+  --rxhop-quantum 16 \
   --simtime 0.05 \
-  --output run/opera_108tor_8flow_4MiB/results_8x4MiB_hostflow_stagger2
+  --output run/opera_108tor_8flow_4MiB/results_8x4MiB_hostflow_stagger2_q16
 ```
 
 For a quick setup check, run only FIFO with smaller flows. This is not the
@@ -68,7 +71,7 @@ bash run/opera_108tor_8flow_4MiB/run.sh \
 The root output contains the shared workload and `comparison.csv`. Each of
 `fifo/` and `rxhopprio/` contains `summary.csv`, `per_flow.csv`,
 `per_queue.csv`, `per_tor.csv`, `flow_credit_scheduler.csv`, simulator logs,
-and the exact command used. The FIFO scheduler CSV contains only its header;
+`per_credit_hop.csv`, and the exact command used. The FIFO scheduler CSV contains only its header;
 the `rxhopprio` file records every pre-generation Flow selection.
 
 ## Tests

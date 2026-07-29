@@ -15,7 +15,9 @@ CreditStats host 4 -1 100 90 0 4 10 5 0 5 0 20 10
 DataQueueStats host 4 -1 1 3000 0
 CreditStats tor 1 4 90 70 0 8 15 0 0 15 0 40 25
 DataQueueStats tor 1 4 2 4500 0
-FlowCreditStats 0 0 4 2 100 70 190 160 30 5 0 20 0 40 25 60 5 1 4 200
+FlowCreditStats 0 0 4 2 100 70 190 160 30 5 0 20 0 40 25 60 5 1 4 200 90 10 20 1 4 180 1 4 140 140 0
+CreditHopStats 2 regular 60 55 50 5 5 100 0
+CreditHopStats 2 tentative 40 35 20 5 15 40 0
 TopologyClipStats 5 2 1 0
 TopologyWrongDstStats 0 1 0 0
 """
@@ -26,6 +28,14 @@ TopologyWrongDstStats 0 1 0 0
 
         self.assertEqual(parsed["flow_credits"][0]["topology"], 5)
         self.assertEqual(parsed["flow_credits"][0]["path_hops_sum"], 200)
+        self.assertEqual(parsed["flow_credits"][0]["admitted"], 90)
+        self.assertEqual(parsed["flow_credits"][0]["delivered_path_hops_sum"], 140)
+        hop_rows = analyze.build_credit_hop_rows(parsed)
+        combined = next(row for row in hop_rows if row["credit_type"] == "all")
+        self.assertEqual(combined["delivered"], 70)
+        self.assertEqual(combined["delivered_actual_hops"], 140)
+        self.assertEqual(combined["delivered_link_bytes"], 140 * 64)
+        self.assertAlmostEqual(combined["path_delivery_ratio"], 70 / 90)
         self.assertEqual(parsed["queues"][0]["max_data_queue_bytes"], 3000)
         self.assertEqual(parsed["topology_clip"]["data"], 2)
         self.assertEqual(parsed["topology_wrong_dst"]["data"], 1)
@@ -62,6 +72,7 @@ TopologyWrongDstStats 0 1 0 0
                     "completed": True,
                     "unfinished_marker": False,
                     "generated": 100,
+                    "admitted": 80,
                     "delivered": 80,
                     "dropped": 20,
                     "overflow": 5,
@@ -75,6 +86,16 @@ TopologyWrongDstStats 0 1 0 0
                     "path_hops_sum": 250,
                     "path_hops_min": 1,
                     "path_hops_max": 8,
+                    "endpoint_dropped": 20,
+                    "path_dropped": 0,
+                    "admitted_path_hops_sum": 200,
+                    "admitted_path_hops_min": 1,
+                    "admitted_path_hops_max": 8,
+                    "delivered_path_hops_sum": 200,
+                    "delivered_path_hops_min": 1,
+                    "delivered_path_hops_max": 8,
+                    "delivered_actual_hops_sum": 200,
+                    "delivered_hop_mismatches": 0,
                 }
             )
 
@@ -122,6 +143,8 @@ TopologyWrongDstStats 0 1 0 0
 
         self.assertEqual(summary["completed_flows"], 64)
         self.assertEqual(summary["generated_credits"], 6_400)
+        self.assertEqual(summary["admitted_credits"], 5_120)
+        self.assertEqual(summary["mean_delivered_credit_path_hops"], 2.5)
         self.assertAlmostEqual(summary["credit_drop_ratio"], 0.2)
         self.assertEqual(len(tor_rows), 16)
         self.assertTrue(all(row["outgoing_flows"] == 4 for row in tor_rows))

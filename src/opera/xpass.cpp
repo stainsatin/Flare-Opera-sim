@@ -159,6 +159,7 @@ void XPassSrc::receivePacket(Packet& pkt)
   switch (pkt.type()) {
     case XPCREDIT: 
       {
+        recordFlowCreditDelivery(pkt);
         XPassPull *p = (XPassPull*)(&pkt);
         XPassPull::seq_t cum_ackno = p->cumulative_ack();
         if (cum_ackno > _last_acked) { // a brand new ack    
