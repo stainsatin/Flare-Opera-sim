@@ -936,7 +936,7 @@ void XPassSink::updateSliceFeedbackState() {
     if(srcToR != dstToR) {
         int npaths = top->get_no_paths(srcToR, dstToR, slice);
         //what path actually
-        int path_index = fast_rand() % npaths;
+        int path_index = npaths == 1 ? 0 : fast_rand() % npaths;
         hops = top->get_no_hops(srcToR, dstToR, slice, path_index);
     }
     if(_crt_hops == -1) {
@@ -1048,7 +1048,7 @@ XPassSink::sendToNIC(Packet* pkt) {
     int npaths = top->get_no_paths(pkt->get_src_ToR(),
                                   top->get_firstToR(pkt->get_dst()), slice);
     assert(npaths > 0);
-    int path_index = fast_rand() % npaths;
+    int path_index = npaths == 1 ? 0 : fast_rand() % npaths;
     int hops = top->get_no_hops(pkt->get_src_ToR(),
                                 top->get_firstToR(pkt->get_dst()), slice,
                                 path_index);

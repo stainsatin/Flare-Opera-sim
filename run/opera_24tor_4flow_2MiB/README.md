@@ -1,92 +1,79 @@
-# 24-ToR lighter receiver-NIC priority experiment
+# 24-ToR RCDCP experiment
 
-This experiment keeps `topologies/opera_24tor_4host_55us.txt` and separates
-receiver-NIC Credit service from priority-aware admission. The default run
-uses one shared trace for four cases:
+This experiment evaluates Regular-Centric Dynamic Credit Priority (RCDCP) on
+`topologies/opera_24tor_4host_55us.txt`. All modes share one physical `credq`,
+the same traffic trace, and the same Flare parameters.
 
-| Case | Service | Admission |
-|---|---|---|
-| `fifo` | Original FIFO | Original total-occupancy checks, no push-out |
-| `wrr` | Hop-class WRR `8:2:1` | Original checks, no push-out |
-| `admission` | Original FIFO | Class-cumulative checks and priority push-out |
-| `combined` | Hop-class WRR `8:2:1` | Class-cumulative checks and priority push-out |
+| Mode | Tentative threshold occupancy | NIC service | Push-out |
+|---|---|---|---|
+| `fifo_original` | Original global occupancy | FIFO | Off |
+| `fifo_global` | Explicit global occupancy | FIFO | Off |
+| `wrr421` | Global occupancy | Smooth WRR `4:2:1` | Off |
+| `wrr821` | Global occupancy | Smooth WRR `8:2:1` | Off |
 
-It is intentionally lighter than the earlier 8-flow x 4-MiB workload.
+`fifo_original` and `fifo_global` are expected to match: original FIFO already
+uses total shared occupancy. This pair is a Phase-1 regression check. The WRR
+modes add dynamic High/Medium/Low service after that check. Pending Credits are
+reclassified whenever `time_to_slice()` changes; an enqueue sequence preserves
+FIFO order inside the resulting class.
 
-Admission uses one shared `credq`: High sees High occupancy, Medium sees
-High+Medium, and Low sees the full queue. A tentative arrival can only replace
-a lower-hop tentative Credit. A regular arrival first replaces the worst-hop
-tentative Credit, then a lower-hop-priority regular Credit. The Credit already
-being serialized is protected, and admission-only service remains global FIFO.
-
-## Default workload
+## Workload
 
 ```text
 24 ToRs, 4 Hosts/ToR, 96 Hosts
 4 outgoing and 4 incoming flows per Host
-2 MiB per flow, 8 MiB sourced and received per Host
-384 flows, 768 MiB total data
+2 MiB per flow, 384 flows total
 cwnd = 4 packets
 starts spread across 8 x 55 us superslices
-20 ms simulated time
+20 ms simulated time (more than 15 complete 1.32 ms cycles)
 ```
 
-The ToR offsets are `[3, 9, 15, 21]`, so every selected direction has its
-reverse direction. Each superslice starts exactly 48 flows. Every ToR starts
-two outgoing and two incoming flows per superslice, every receiver Host gets
-at most one new flow in a superslice, and every timestamp stays inside the
-54 us optical active window.
-
-Compared with the previous default, this halves the flow count, halves each
-flow size, reduces total offered bytes by 75%, and expands the release window
-from two to eight superslices. Queue capacities and Flare feedback parameters
-remain unchanged for a controlled comparison.
+The analyzer reports `flows_spanning_3_cycles_ratio`. Extending `simtime` does
+not itself lengthen a completed 2-MiB flow, so this column must be checked rather
+than assuming every flow spans three cycles.
 
 ## Run
 
-Build and run all four cases:
+Build once and run all four modes for seeds 1 through 5:
 
 ```bash
 bash run/opera_24tor_4flow_2MiB/run.sh --build
 ```
 
-Reuse an existing executable:
+Run phases separately:
+
+```bash
+bash run/opera_24tor_4flow_2MiB/run.sh --no-build --mode fifo_original
+bash run/opera_24tor_4flow_2MiB/run.sh --no-build --mode fifo_global
+bash run/opera_24tor_4flow_2MiB/run.sh --no-build --mode wrr421
+bash run/opera_24tor_4flow_2MiB/run.sh --no-build --mode wrr821
+```
+
+Use a smaller seed subset while checking a server build:
 
 ```bash
 bash run/opera_24tor_4flow_2MiB/run.sh \
-  --no-build \
-  --scheduler all \
-  --rxhop-weights 8:2:1 \
-  --simtime 0.02 \
-  --output run/opera_24tor_4flow_2MiB/results_4x2MiB_stagger8_w821_admission
+  --no-build --mode all --seeds 1 \
+  --output run/opera_24tor_4flow_2MiB/results_rcdcp_smoke
 ```
 
-For a still lighter release rate without changing bytes or the traffic matrix:
+The full run writes `multi_seed_summary.csv` with every seed plus mean,
+standard deviation, and 95% confidence interval. Each case also writes:
 
-```bash
-bash run/opera_24tor_4flow_2MiB/run.sh \
-  --no-build \
-  --scheduler all \
-  --start-superslices 16 \
-  --output run/opera_24tor_4flow_2MiB/results_4x2MiB_stagger16_w821_admission
-```
+- `summary.csv`, `per_flow.csv`, `per_queue.csv`, `per_tor.csv`
+- `credit_lifecycle.csv`, `per_credit_hop.csv`
+- `per_nic_credit_slot.csv`, `tentative_admission.csv`
+- `per_tor_uplink_credit.csv`, `per_rotor_credit.csv`
 
-Each case produces `summary.csv`, `per_flow.csv`, `per_queue.csv`,
-`per_priority_queue.csv`, `per_tor.csv`, and `per_credit_hop.csv`. The output
-root also contains the shared workload and `comparison.csv`.
+The primary decision metrics are `regular_delivered_per_nic_slot` and
+`regular_delivered_per_credit_hop`. Mean hop count is supporting evidence, not
+the success criterion.
 
-The main acceptance columns in `summary.csv` are
-`mean_admitted_credit_path_hops`, `mean_delivered_credit_path_hops`,
-`mean_delivered_actual_credit_hops`,
-`regular_admitted_share`, `regular_delivered_share`,
-`tor_queue_credit_drops`, `total_credit_network_link_bytes`, and the FCT
-columns. `per_credit_hop.csv` provides the admitted/delivered composition by
-hop count and regular/tentative type.
+In the new lifecycle counters, `admitted` means accepted into the receiver NIC
+buffer and `sent` means actually serialized out of that NIC. Therefore
+`regular_delivered_per_sent` is the pure post-NIC path success ratio, while the
+required `regular_delivered_per_admitted` also includes later endpoint timeout
+or push-out losses.
 
-## Tests
-
-```bash
-python3 -m unittest discover \
-  -s run/opera_24tor_4flow_2MiB \
-  -p 'test_*.py'
-```
+Detailed slot traces can be large. `--no-slot-trace` leaves the two event-level
+CSVs with headers only while retaining aggregate lifecycle and queue metrics.

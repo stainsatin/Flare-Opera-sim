@@ -215,17 +215,24 @@ RlbModule* DynExpTopology::alloc_rlb_module(DynExpTopology* top, int node) {
 Queue* DynExpTopology::alloc_src_queue(DynExpTopology* top, QueueLogger* queueLogger, int node) {
   if(qt==CREDIT) {
     bool rx_hop_prio = false;
-    bool rx_prio_admit = false;
+    bool rx_global_tentative = false;
+    bool rx_credit_pushout = false;
+    bool rx_credit_slot_trace = false;
+    uint64_t priority_seed = 13;
     uint32_t high_weight = 4;
     uint32_t medium_weight = 2;
     uint32_t low_weight = 1;
     map<string,uint64_t>::const_iterator prio_it =
         _params.find("rx_hop_prio");
     if (prio_it != _params.end()) rx_hop_prio = prio_it->second != 0;
-    map<string,uint64_t>::const_iterator admit_it =
-        _params.find("rx_prio_admit");
-    if (admit_it != _params.end())
-        rx_prio_admit = admit_it->second != 0;
+    if (_params.count("rx_global_tentative"))
+        rx_global_tentative = _params["rx_global_tentative"] != 0;
+    if (_params.count("rx_credit_pushout"))
+        rx_credit_pushout = _params["rx_credit_pushout"] != 0;
+    if (_params.count("rx_credit_slot_trace"))
+        rx_credit_slot_trace = _params["rx_credit_slot_trace"] != 0;
+    if (_params.count("priority_seed"))
+        priority_seed = _params["priority_seed"];
     if (_params.count("rx_hop_weight_high"))
         high_weight = _params["rx_hop_weight_high"];
     if (_params.count("rx_hop_weight_medium"))
@@ -233,8 +240,9 @@ Queue* DynExpTopology::alloc_src_queue(DynExpTopology* top, QueueLogger* queueLo
     if (_params.count("rx_hop_weight_low"))
         low_weight = _params["rx_hop_weight_low"];
     return new NICCreditQueue(speedFromMbps((uint64_t)HOST_NIC), memFromPkt(FEEDER_BUFFER), *eventlist, queueLogger, this, _params["cq_size"], _params["sh_thresh"], 
-    _params["ae_thresh"], _params["te_thresh"],
-    rx_hop_prio, rx_prio_admit,
+    _params["ae_thresh"], _params["te_thresh"], node,
+    rx_hop_prio, rx_global_tentative, rx_credit_pushout,
+    rx_credit_slot_trace, priority_seed,
     high_weight, medium_weight, low_weight);
   }
   if(qt==HBH) {

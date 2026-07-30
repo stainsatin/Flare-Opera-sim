@@ -21,6 +21,11 @@ CreditHopStats 2 tentative 40 35 20 5 15 40 0
 CreditPriorityStats host 4 -1 high 4 40 35 0 12 5 0
 CreditPriorityStats host 4 -1 medium 2 35 25 0 15 10 2
 CreditPriorityStats host 4 -1 low 1 25 10 0 20 15 3
+NICCreditSlot 1000 4 3 regular high 0 1 2 1 0 3 2 1 0 0
+TentativeAdmission 900 4 0 3 1 high 1 1 0 2 4 admit
+CreditTypeClassStats tor 1 4 tentative high 40 25 0 12 15 10 2 3 0 0
+CreditLifecycleStats regular high 60 58 55 50 2 5 0 1 1 0 0 0 2 1 1 1 100
+CreditLifecycleStats tentative high 40 35 35 20 5 15 4 1 0 0 0 10 3 1 1 0 70
 TopologyClipStats 5 2 1 0
 TopologyWrongDstStats 0 1 0 0
 """
@@ -28,6 +33,8 @@ TopologyWrongDstStats 0 1 0 0
             path = Path(directory) / "uniform.log"
             path.write_text(log, encoding="ascii")
             parsed = analyze.parse_log(path)
+            slot_rows = (Path(directory) / "per_nic_credit_slot.csv").read_text()
+            admission_rows = (Path(directory) / "tentative_admission.csv").read_text()
 
         self.assertEqual(parsed["flow_credits"][0]["topology"], 5)
         self.assertEqual(parsed["flow_credits"][0]["path_hops_sum"], 200)
@@ -46,6 +53,12 @@ TopologyWrongDstStats 0 1 0 0
         self.assertEqual(parsed["queues"][0]["max_data_queue_bytes"], 3000)
         self.assertEqual(parsed["topology_clip"]["data"], 2)
         self.assertEqual(parsed["topology_wrong_dst"]["data"], 1)
+        self.assertEqual(len(parsed["lifecycle_stats"]), 2)
+        self.assertEqual(parsed["lifecycle_stats"][0]["network_hops"], 100)
+        self.assertEqual(parsed["type_class_stats"][0]["tentative_drop"], 10)
+        self.assertEqual(parsed["nic_slot_totals"]["regular"], 1)
+        self.assertIn("regular,high", slot_rows)
+        self.assertIn("high,1,1,0,2,4,admit", admission_rows)
 
     def test_queue_roles_use_four_downlinks(self):
         queues = [
@@ -141,6 +154,52 @@ TopologyWrongDstStats 0 1 0 0
         parsed = {
             "utilization": [(1.0, 0.5)],
             "input_load": [(1.0, 0.5)],
+            "lifecycle_stats": [
+                {
+                    "credit_type": "regular",
+                    "priority_class": "high",
+                    "generated": 4_000,
+                    "admitted": 3_900,
+                    "sent": 3_800,
+                    "delivered": 3_500,
+                    "endpoint_drop": 500,
+                    "path_drop": 300,
+                    "endpoint_tentative": 0,
+                    "endpoint_shaping": 200,
+                    "endpoint_overflow": 200,
+                    "endpoint_timeout": 100,
+                    "endpoint_pushout": 0,
+                    "path_tentative": 0,
+                    "path_shaping": 200,
+                    "path_overflow": 100,
+                    "path_topology_clip": 0,
+                    "path_wrong_dst": 0,
+                    "network_hops": 8_000,
+                },
+                {
+                    "credit_type": "tentative",
+                    "priority_class": "low",
+                    "generated": 2_400,
+                    "admitted": 1_500,
+                    "sent": 1_200,
+                    "delivered": 1_000,
+                    "endpoint_drop": 1_400,
+                    "path_drop": 200,
+                    "endpoint_tentative": 1_000,
+                    "endpoint_shaping": 200,
+                    "endpoint_overflow": 100,
+                    "endpoint_timeout": 100,
+                    "endpoint_pushout": 0,
+                    "path_tentative": 100,
+                    "path_shaping": 50,
+                    "path_overflow": 50,
+                    "path_topology_clip": 0,
+                    "path_wrong_dst": 0,
+                    "network_hops": 4_000,
+                },
+            ],
+            "type_class_stats": [],
+            "nic_slot_totals": {"total": 5_000, "fallback": 250},
             "credit_hop_stats": [
                 {"credit_type": "regular", "admitted": 4_000, "delivered": 3_500},
                 {"credit_type": "tentative", "admitted": 1_120, "delivered": 1_620},
@@ -156,11 +215,17 @@ TopologyWrongDstStats 0 1 0 0
         self.assertEqual(summary["completed_flows"], 64)
         self.assertEqual(summary["generated_credits"], 6_400)
         self.assertEqual(summary["admitted_credits"], 5_120)
-        self.assertAlmostEqual(summary["regular_admitted_share"], 4_000 / 5_120)
+        self.assertAlmostEqual(summary["regular_admitted_share"], 3_900 / 5_120)
         self.assertAlmostEqual(summary["regular_delivered_share"], 3_500 / 5_120)
         self.assertEqual(summary["mean_delivered_credit_path_hops"], 2.5)
         self.assertEqual(summary["mean_delivered_actual_credit_hops"], 2.4)
-        self.assertEqual(summary["total_credit_network_link_bytes"], 64 * 232 * 64)
+        self.assertEqual(summary["total_credit_network_link_bytes"], 12_000 * 64)
+        self.assertAlmostEqual(summary["regular_delivered_per_nic_slot"], 0.7)
+        self.assertAlmostEqual(
+            summary["regular_delivered_per_credit_hop"], 3_500 / 12_000
+        )
+        self.assertAlmostEqual(summary["tentative_nic_slot_share"], 0.24)
+        self.assertAlmostEqual(summary["nic_slot_fallback_ratio"], 0.05)
         self.assertAlmostEqual(summary["credit_drop_ratio"], 0.2)
         self.assertEqual(len(tor_rows), 16)
         self.assertTrue(all(row["outgoing_flows"] == 4 for row in tor_rows))

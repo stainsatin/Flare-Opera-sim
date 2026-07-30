@@ -9,6 +9,7 @@
 
 #include <list>
 #include <map>
+#include <vector>
 #include "config.h"
 #include "eventlist.h"
 #include "network.h"
@@ -50,8 +51,24 @@ struct FlowCreditCounters {
 
 void reportFlowCreditStats();
 void reportCreditHopStats();
+void reportCreditLifecycleStats();
 void recordFlowCreditDelivery(Packet& pkt);
-void recordFlowCreditTopologyDrop(Packet& pkt, uint32_t consumed_hops);
+void recordFlowCreditTopologyDrop(Packet& pkt, uint32_t consumed_hops,
+                                  bool wrong_destination = false);
+void recordCreditNetworkHop(Packet& pkt);
+
+struct CreditClassQueueCounters {
+    uint64_t arrived = 0;
+    uint64_t transmitted = 0;
+    uint64_t dropped = 0;
+    uint64_t tentative_threshold = 0;
+    uint64_t shaping = 0;
+    uint64_t overflow = 0;
+    uint64_t timeout = 0;
+    uint64_t pushout = 0;
+    mem_b queued_bytes = 0;
+    mem_b max_queued_bytes = 0;
+};
 
 class CreditQueue : public Queue {
  public:
@@ -66,6 +83,7 @@ class CreditQueue : public Queue {
     virtual void reportMaxqueuesize();
     void reportCreditStats(const string& scope, int id, int port);
     void reportPriorityStats(const string& scope, int id, int port);
+    void reportTypeClassStats(const string& scope, int id, int port);
  protected:
     enum pkt_type {NONE, DATA, CRED};
     pkt_type _tx_next;
@@ -78,8 +96,14 @@ class CreditQueue : public Queue {
     bool receiverPriorityEnabled() const;
     int creditClass(Packet &pkt);
     int creditQueueIndex(Packet &pkt);
+    int creditType(Packet &pkt) const;
     int next_cred();
     void advanceCreditPriority(int served_prio);
+    void buildCreditSchedule();
+    void refreshPriorityClassification();
+    int independentPathIndex(Packet &pkt, int absolute_slice,
+                             int npaths) const;
+    void installPriorityRoute(Packet &pkt, int slice);
     bool evictPriorityCredit(Packet &arriving, int arriving_class);
     bool evictCreditVictim(int victim_class, bool tentative);
     void accountCreditEnqueue(Packet &pkt, int queue_index, int credit_class);
@@ -87,7 +111,15 @@ class CreditQueue : public Queue {
     void dropQueuedCredit(Packet* pkt, int queue_index, int credit_class,
                           bool pushout);
     void notePriorityDrop(int credit_class, bool pushout);
-    mem_b priorityQueuesize(int credit_class);
+    void noteTypeClassDrop(Packet &pkt, int credit_class, int reason);
+    void reportTentativeAdmission(Packet &pkt, int credit_class,
+                                  const vector<mem_b>& occupancy,
+                                  mem_b total_occupancy,
+                                  const char* decision) const;
+    void reportNICCreditSlot(Packet &pkt, int credit_class,
+                             const vector<mem_b>& class_lengths,
+                             uint64_t regular_pending,
+                             uint64_t tentative_pending) const;
     mem_b queuesize_cred(int prio); //queue within a certain prio
     mem_b queuesize_cred(); //full queue size
     mem_b _maxsize_cred;
@@ -102,6 +134,7 @@ class CreditQueue : public Queue {
     simtime_picosec _next_sched_tx;
     simtime_picosec _cred_timeout;
     bool _cred_tx_pending;
+    Packet* _credit_in_service;
     vector<list<Packet*>> _enqueued_cred;
     uint64_t _tot_creds;
     uint64_t _tx_creds;
@@ -116,16 +149,26 @@ class CreditQueue : public Queue {
     map<int, uint64_t> _hops_to_creds;
     bool _is_nic;
     bool _rx_hop_prio;
-    bool _rx_prio_admit;
+    bool _rx_global_tentative;
+    bool _rx_credit_pushout;
+    bool _rx_credit_slot_trace;
+    uint64_t _priority_seed;
+    int _host_id;
+    int _last_priority_slice;
+    uint64_t _credit_enqueue_sequence;
     vector<uint32_t> _credit_weights;
-    int _wrr_priority;
-    uint32_t _wrr_remaining;
+    vector<int> _wrr_schedule;
+    uint32_t _wrr_schedule_position;
+    int _selected_schedule_position;
+    int _selected_schedule_target;
+    bool _selected_fallback;
     vector<uint64_t> _priority_arrivals;
     vector<uint64_t> _priority_transmissions;
     vector<uint64_t> _priority_drops;
     vector<uint64_t> _priority_pushouts;
     vector<mem_b> _priority_queued_bytes;
     vector<mem_b> _priority_max_queued;
+    CreditClassQueueCounters _type_class_stats[2][3];
 };
 
 class NICCreditQueue : public CreditQueue {
@@ -133,8 +176,11 @@ class NICCreditQueue : public CreditQueue {
     NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize, EventList &eventlist,
 		QueueLogger* logger, DynExpTopology *top,
         mem_b credsize, mem_b shaping_thresh, mem_b aeolus_thresh,
-        mem_b tent_thresh, bool rx_hop_prio = false,
-        bool rx_prio_admit = false,
+        mem_b tent_thresh, int host_id, bool rx_hop_prio = false,
+        bool rx_global_tentative = false,
+        bool rx_credit_pushout = false,
+        bool rx_credit_slot_trace = false,
+        uint64_t priority_seed = 13,
         uint32_t high_weight = 4, uint32_t medium_weight = 2,
         uint32_t low_weight = 1);
     void completeService();

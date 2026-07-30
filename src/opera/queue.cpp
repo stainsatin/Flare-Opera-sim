@@ -85,6 +85,9 @@ void Queue::sendFromQueue(Packet* pkt) {
         nextpipe->receivePacket(*pkt);
     } else {
         if (!top->is_last_hop(_port)) {
+            if (pkt->type() == XPCREDIT) {
+                recordCreditNetworkHop(*pkt);
+            }
             int next_tor = top->get_nextToR(top->time_to_slice(eventlist().now()),
                     pkt->get_crtToR(), pkt->get_crtport());
             pkt->add_hop({_tor, next_tor});
@@ -132,7 +135,7 @@ void Queue::sendFromQueue(Packet* pkt) {
                     case XPCREDIT:
                         __global_topology_wrong_dst_credits++;
                         recordFlowCreditTopologyDrop(
-                            *pkt, max(pkt->get_crthop(), 0));
+                            *pkt, max(pkt->get_crthop(), 0), true);
                         cout << "!!! XPCREDIT";
                         break;
                     case XPCTL:

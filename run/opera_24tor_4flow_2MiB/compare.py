@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Compare FIFO, WRR, priority-admission, and combined summary CSVs."""
+"""Compare one seed of the four RCDCP experiment modes."""
 
 import argparse
 import csv
 from pathlib import Path
 
 
-CASES = ("fifo", "wrr", "admission", "combined")
+CASES = ("fifo_original", "fifo_global", "wrr421", "wrr821")
 METRICS = (
     ("completed_flows", "higher"),
     ("completion_ratio", "higher"),
@@ -16,6 +16,13 @@ METRICS = (
     ("simulation_throughput_gbps", "higher"),
     ("active_makespan_throughput_gbps", "higher"),
     ("flow_goodput_jain", "higher"),
+    ("regular_delivered", "higher"),
+    ("regular_delivered_per_generated", "higher"),
+    ("regular_delivered_per_nic_slot", "higher"),
+    ("regular_delivered_per_credit_hop", "higher"),
+    ("tentative_nic_slot_share", "lower"),
+    ("tor_uplink_tentative_drops", "lower"),
+    ("medium_low_endpoint_timeout", "lower"),
     ("mean_admitted_credit_path_hops", "lower"),
     ("mean_delivered_credit_path_hops", "lower"),
     ("mean_delivered_actual_credit_hops", "lower"),
@@ -60,7 +67,7 @@ def compare_summaries(summaries):
             row[case] = text
             values[case] = parse_number(text)
 
-        fifo_value = values["fifo"]
+        fifo_value = values["fifo_original"]
         for case in CASES[1:]:
             value = values[case]
             delta = None if fifo_value is None or value is None else value - fifo_value
@@ -113,6 +120,9 @@ def main():
             "mean_delivered_credit_path_hops",
             "mean_delivered_actual_credit_hops",
             "regular_delivered_share",
+            "regular_delivered_per_nic_slot",
+            "regular_delivered_per_credit_hop",
+            "tentative_nic_slot_share",
             "tor_queue_credit_drops",
             "total_credit_network_link_bytes",
         }:

@@ -96,6 +96,7 @@ public:
     p->_xpsink = xpsink;
     p->_tentative = false;
     p->_prio = false;
+    p->_credit_enqueue_seq = 0;
     p->_queueing = 0;
     return p;
   }
@@ -110,6 +111,8 @@ public:
   bool tentative() {return _tentative;}
   void set_prio(bool prio) {_prio = prio;}
   bool prio() {return _prio;}
+  void set_credit_enqueue_seq(uint64_t sequence) {_credit_enqueue_seq = sequence;}
+  uint64_t credit_enqueue_seq() const {return _credit_enqueue_seq;}
   inline simtime_picosec ts() const {return _ts;}
   inline void set_ts(simtime_picosec ts) {_ts = ts;}
   XPassSrc *get_xpsrc() {return _xpsrc;}
@@ -126,6 +129,7 @@ protected:
   seq_t _cumulative_ack;
   bool _tentative;
   bool _prio;
+  uint64_t _credit_enqueue_seq;
   static PacketDB<XPassPull> _packetdb;
 };
 

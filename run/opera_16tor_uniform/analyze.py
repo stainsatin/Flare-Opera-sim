@@ -94,6 +94,75 @@ CREDIT_HOP_OUTPUT_FIELDS = (
     "path_drop_ratio",
     "delivered_link_bytes",
 )
+TYPE_CLASS_FIELDS = (
+    "scope",
+    "id",
+    "port",
+    "credit_type",
+    "priority_class",
+    "arrived",
+    "transmitted",
+    "queued",
+    "max_queue",
+    "dropped",
+    "tentative_drop",
+    "shaping_drop",
+    "overflow_drop",
+    "timeout_drop",
+    "pushout_drop",
+)
+LIFECYCLE_FIELDS = (
+    "credit_type",
+    "priority_class",
+    "generated",
+    "admitted",
+    "sent",
+    "delivered",
+    "endpoint_drop",
+    "path_drop",
+    "endpoint_tentative",
+    "endpoint_shaping",
+    "endpoint_overflow",
+    "endpoint_timeout",
+    "endpoint_pushout",
+    "path_tentative",
+    "path_shaping",
+    "path_overflow",
+    "path_topology_clip",
+    "path_wrong_dst",
+    "network_hops",
+)
+NIC_SLOT_FIELDS = (
+    "time_ps",
+    "host_id",
+    "slice",
+    "selected_credit_type",
+    "selected_priority_class",
+    "selected_flow_id",
+    "selected_hops",
+    "high_queue_length",
+    "medium_queue_length",
+    "low_queue_length",
+    "total_queue_length",
+    "regular_pending_count",
+    "tentative_pending_count",
+    "wrr_schedule_position",
+    "fallback_occurred",
+)
+TENTATIVE_ADMISSION_FIELDS = (
+    "time_ps",
+    "host_id",
+    "flow_id",
+    "slice",
+    "hops",
+    "priority_class",
+    "high_occupancy",
+    "medium_occupancy",
+    "low_occupancy",
+    "total_occupancy",
+    "tentative_threshold",
+    "decision",
+)
 MSS_BYTES = 1436
 HOST_RATE_GBPS = 100.0
 FLOW_SCHEDULER_FIELDS = (
@@ -177,16 +246,56 @@ def parse_log(path):
     flow_credit_scheduler = []
     priority_queues = []
     credit_hop_stats = []
+    type_class_stats = []
+    lifecycle_stats = []
+    nic_slot_totals = defaultdict(int)
+    tentative_admission_totals = defaultdict(int)
     unfinished_markers = set()
     topology_clip = {"credit": 0, "data": 0, "control": 0, "other": 0}
     topology_wrong_dst = {"credit": 0, "data": 0, "control": 0, "other": 0}
+
+    slot_stream = (path.parent / "per_nic_credit_slot.csv").open(
+        "w", newline="", encoding="utf-8"
+    )
+    slot_writer = csv.DictWriter(slot_stream, fieldnames=NIC_SLOT_FIELDS)
+    slot_writer.writeheader()
+    admission_stream = (path.parent / "tentative_admission.csv").open(
+        "w", newline="", encoding="utf-8"
+    )
+    admission_writer = csv.DictWriter(
+        admission_stream, fieldnames=TENTATIVE_ADMISSION_FIELDS
+    )
+    admission_writer.writeheader()
 
     with path.open(encoding="utf-8", errors="replace") as stream:
         for line in stream:
             fields = line.split()
             if not fields:
                 continue
-            if fields[0] == "CreditStats" and len(fields) >= 15:
+            if fields[0] == "NICCreditSlot" and len(fields) >= 16:
+                record = dict(zip(NIC_SLOT_FIELDS, fields[1:16]))
+                for name in NIC_SLOT_FIELDS:
+                    if name not in {
+                        "selected_credit_type",
+                        "selected_priority_class",
+                    }:
+                        record[name] = int(record[name])
+                slot_writer.writerow(record)
+                nic_slot_totals["total"] += 1
+                nic_slot_totals[record["selected_credit_type"]] += 1
+                nic_slot_totals[record["selected_priority_class"]] += 1
+                nic_slot_totals["fallback"] += record["fallback_occurred"]
+            elif fields[0] == "TentativeAdmission" and len(fields) >= 13:
+                record = dict(zip(TENTATIVE_ADMISSION_FIELDS, fields[1:13]))
+                for name in TENTATIVE_ADMISSION_FIELDS:
+                    if name not in {"priority_class", "decision"}:
+                        record[name] = int(record[name])
+                admission_writer.writerow(record)
+                tentative_admission_totals[record["decision"]] += 1
+                tentative_admission_totals[
+                    f"{record['priority_class']}_{record['decision']}"
+                ] += 1
+            elif fields[0] == "CreditStats" and len(fields) >= 15:
                 record = {
                     "scope": fields[1],
                     "id": int(fields[2]),
@@ -328,6 +437,33 @@ def parse_log(path):
                     }
                 )
                 priority_queues.append(record)
+            elif fields[0] == "CreditTypeClassStats" and len(fields) >= 16:
+                record = {
+                    "scope": fields[1],
+                    "id": int(fields[2]),
+                    "port": int(fields[3]),
+                    "credit_type": fields[4],
+                    "priority_class": fields[5],
+                }
+                record.update(
+                    {
+                        name: int(value)
+                        for name, value in zip(TYPE_CLASS_FIELDS[5:], fields[6:16])
+                    }
+                )
+                type_class_stats.append(record)
+            elif fields[0] == "CreditLifecycleStats" and len(fields) >= 20:
+                record = {
+                    "credit_type": fields[1],
+                    "priority_class": fields[2],
+                }
+                record.update(
+                    {
+                        name: int(value)
+                        for name, value in zip(LIFECYCLE_FIELDS[2:], fields[3:20])
+                    }
+                )
+                lifecycle_stats.append(record)
             elif fields[0] == "TopologyClipStats" and len(fields) >= 5:
                 topology_clip = dict(
                     zip(topology_clip, (int(value) for value in fields[1:5]))
@@ -336,6 +472,9 @@ def parse_log(path):
                 topology_wrong_dst = dict(
                     zip(topology_wrong_dst, (int(value) for value in fields[1:5]))
                 )
+
+    slot_stream.close()
+    admission_stream.close()
 
     if not queue_rows:
         raise RuntimeError(
@@ -362,6 +501,10 @@ def parse_log(path):
         "flow_credit_scheduler": flow_credit_scheduler,
         "priority_queues": priority_queues,
         "credit_hop_stats": credit_hop_stats,
+        "type_class_stats": type_class_stats,
+        "lifecycle_stats": lifecycle_stats,
+        "nic_slot_totals": dict(nic_slot_totals),
+        "tentative_admission_totals": dict(tentative_admission_totals),
         "unfinished_markers": unfinished_markers,
         "topology_clip": topology_clip,
         "topology_wrong_dst": topology_wrong_dst,
@@ -517,6 +660,8 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
     ]
     priority_rows = parsed.get("priority_queues", [])
     credit_hop_stats = parsed.get("credit_hop_stats", [])
+    lifecycle_stats = parsed.get("lifecycle_stats", [])
+    type_class_stats = parsed.get("type_class_stats", [])
 
     def priority_sum(priority, field):
         return sum(
@@ -525,15 +670,64 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
 
     def credit_type_sum(credit_type, field):
         return sum(
-            row[field]
+            row.get(field, 0)
             for row in credit_hop_stats
             if row["credit_type"] == credit_type
         )
 
-    regular_admitted = credit_type_sum("regular", "admitted")
-    tentative_admitted = credit_type_sum("tentative", "admitted")
-    regular_delivered = credit_type_sum("regular", "delivered")
-    tentative_delivered = credit_type_sum("tentative", "delivered")
+    def lifecycle_sum(credit_type, field, priority_class=None):
+        return sum(
+            row[field]
+            for row in lifecycle_stats
+            if row["credit_type"] == credit_type
+            and (priority_class is None or row["priority_class"] == priority_class)
+        )
+
+    regular_generated = (
+        lifecycle_sum("regular", "generated")
+        if lifecycle_stats
+        else credit_type_sum("regular", "generated")
+    )
+    tentative_generated = (
+        lifecycle_sum("tentative", "generated")
+        if lifecycle_stats
+        else credit_type_sum("tentative", "generated")
+    )
+    regular_admitted = (
+        lifecycle_sum("regular", "admitted")
+        if lifecycle_stats
+        else credit_type_sum("regular", "admitted")
+    )
+    tentative_admitted = (
+        lifecycle_sum("tentative", "admitted")
+        if lifecycle_stats
+        else credit_type_sum("tentative", "admitted")
+    )
+    regular_sent = (
+        lifecycle_sum("regular", "sent") if lifecycle_stats else regular_admitted
+    )
+    tentative_sent = (
+        lifecycle_sum("tentative", "sent") if lifecycle_stats else tentative_admitted
+    )
+    regular_delivered = (
+        lifecycle_sum("regular", "delivered")
+        if lifecycle_stats
+        else credit_type_sum("regular", "delivered")
+    )
+    tentative_delivered = (
+        lifecycle_sum("tentative", "delivered")
+        if lifecycle_stats
+        else credit_type_sum("tentative", "delivered")
+    )
+    total_credit_network_hops = (
+        sum(row["network_hops"] for row in lifecycle_stats)
+        if lifecycle_stats
+        else sum(
+            row["delivered_actual_hops_sum"] + row["waste_hops"]
+            for row in flow_rows
+        )
+    )
+    total_nic_credit_sent = regular_sent + tentative_sent
 
     tor_active_goodputs = []
     for tor in sorted({row["source_tor"] for row in flow_rows}):
@@ -560,7 +754,7 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
     )
     start_span_ms = max(row["start_ms"] for row in flow_rows) - first_start_ms
 
-    return {
+    summary = {
         "offered_flows": len(flow_rows),
         "completed_flows": len(completed),
         "incomplete_flows": len(flow_rows) - len(completed),
@@ -588,6 +782,12 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         "p95_fct_ms": percentile(fcts, 0.95),
         "p99_fct_ms": percentile(fcts, 0.99),
         "max_fct_ms": max(fcts) if fcts else "",
+        "flows_spanning_3_cycles_ratio": (
+            sum(row["fct_ms"] >= 3.0 * cycle_us / 1000.0 for row in completed)
+            / len(completed)
+            if completed and cycle_us
+            else ""
+        ),
         "flow_goodput_jain": jain_fairness(goodputs),
         "tor_goodput_jain": jain_fairness(tor_active_goodputs),
         "flow_scheduler_grants": len(scheduler_rows),
@@ -684,6 +884,52 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         ),
         "generated_credits": generated,
         "admitted_credits": admitted,
+        "regular_generated": regular_generated,
+        "regular_admitted": regular_admitted,
+        "regular_sent": regular_sent,
+        "regular_delivered": regular_delivered,
+        "tentative_generated": tentative_generated,
+        "tentative_admitted": tentative_admitted,
+        "tentative_sent": tentative_sent,
+        "tentative_delivered": tentative_delivered,
+        "regular_delivered_per_generated": (
+            regular_delivered / regular_generated if regular_generated else 0.0
+        ),
+        "regular_delivered_per_admitted": (
+            regular_delivered / regular_admitted if regular_admitted else 0.0
+        ),
+        "regular_delivered_per_sent": (
+            regular_delivered / regular_sent if regular_sent else 0.0
+        ),
+        "tentative_delivered_per_sent": (
+            tentative_delivered / tentative_sent if tentative_sent else 0.0
+        ),
+        "regular_delivered_rate": regular_delivered / simtime_s,
+        "regular_delivered_per_nic_slot": (
+            regular_delivered / total_nic_credit_sent
+            if total_nic_credit_sent
+            else 0.0
+        ),
+        "regular_delivered_per_credit_hop": (
+            regular_delivered / total_credit_network_hops
+            if total_credit_network_hops
+            else 0.0
+        ),
+        "credit_hops_per_regular_delivered": (
+            total_credit_network_hops / regular_delivered
+            if regular_delivered
+            else ""
+        ),
+        "tentative_nic_slot_share": (
+            tentative_sent / total_nic_credit_sent if total_nic_credit_sent else 0.0
+        ),
+        "tentative_path_success_ratio": (
+            tentative_delivered / tentative_admitted if tentative_admitted else 0.0
+        ),
+        "regular_path_success_ratio": (
+            regular_delivered / regular_admitted if regular_admitted else 0.0
+        ),
+        "total_nic_credit_sent": total_nic_credit_sent,
         "regular_admitted_credits": regular_admitted,
         "tentative_admitted_credits": tentative_admitted,
         "regular_admitted_share": (
@@ -748,15 +994,8 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         "credit_waste_hops_per_generated": (
             sum(row["waste_hops"] for row in flow_rows) / generated if generated else 0.0
         ),
-        "total_credit_network_hops": sum(
-            row["delivered_actual_hops_sum"] + row["waste_hops"]
-            for row in flow_rows
-        ),
-        "total_credit_network_link_bytes": sum(
-            row["delivered_actual_hops_sum"] + row["waste_hops"]
-            for row in flow_rows
-        )
-        * 64,
+        "total_credit_network_hops": total_credit_network_hops,
+        "total_credit_network_link_bytes": total_credit_network_hops * 64,
         "max_credit_queue_packets": max(
             (row["max_queued"] for row in queue_rows), default=0
         ),
@@ -774,6 +1013,55 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
             (row["max_data_queue_bytes"] / 1500.0 for row in queue_rows), default=0.0
         ),
     }
+
+    for credit_type in ("regular", "tentative"):
+        for priority_class in ("high", "medium", "low"):
+            for stage in (
+                "generated",
+                "admitted",
+                "sent",
+                "delivered",
+                "endpoint_drop",
+                "path_drop",
+            ):
+                summary[f"{credit_type}_{priority_class}_{stage}"] = lifecycle_sum(
+                    credit_type, stage, priority_class
+                )
+        for reason in (
+            "endpoint_tentative",
+            "endpoint_shaping",
+            "endpoint_overflow",
+            "endpoint_timeout",
+            "endpoint_pushout",
+            "path_tentative",
+            "path_shaping",
+            "path_overflow",
+            "path_topology_clip",
+            "path_wrong_dst",
+        ):
+            summary[f"{credit_type}_{reason}"] = lifecycle_sum(
+                credit_type, reason
+            )
+
+    summary["medium_low_endpoint_timeout"] = sum(
+        lifecycle_sum(credit_type, "endpoint_timeout", priority_class)
+        for credit_type in ("regular", "tentative")
+        for priority_class in ("medium", "low")
+    )
+    summary["tor_uplink_tentative_drops"] = sum(
+        row["dropped"]
+        for row in type_class_stats
+        if row["scope"] == "tor"
+        and row["port"] >= hosts_per_tor
+        and row["credit_type"] == "tentative"
+    )
+    summary["nic_slot_fallback_ratio"] = (
+        parsed.get("nic_slot_totals", {}).get("fallback", 0)
+        / parsed.get("nic_slot_totals", {}).get("total", 0)
+        if parsed.get("nic_slot_totals", {}).get("total", 0)
+        else 0.0
+    )
+    return summary
 
 
 def build_tor_rows(flow_rows, queue_rows, hosts_per_tor):
@@ -868,6 +1156,52 @@ def add_priority_queue_labels(priority_rows, hosts_per_tor):
         row["tor"] = row["id"] // hosts_per_tor if row["scope"] == "host" else row["id"]
 
 
+def build_uplink_credit_rows(type_class_rows, hosts_per_tor):
+    rows = []
+    for record in type_class_rows:
+        if record["scope"] != "tor" or record["port"] < hosts_per_tor:
+            continue
+        rows.append(
+            {
+                "tor_id": record["id"],
+                "port_id": record["port"],
+                "rotor_id": record["port"] - hosts_per_tor,
+                "credit_type": record["credit_type"],
+                "priority_class": record["priority_class"],
+                "arrived": record["arrived"],
+                "transmitted": record["transmitted"],
+                "dropped": record["dropped"],
+                "tentative_drop": record["tentative_drop"],
+                "shaping_drop": record["shaping_drop"],
+                "overflow_drop": record["overflow_drop"],
+                "max_queue": record["max_queue"],
+            }
+        )
+    return rows
+
+
+def build_rotor_credit_rows(uplink_rows):
+    grouped = defaultdict(lambda: defaultdict(int))
+    for record in uplink_rows:
+        counters = grouped[record["rotor_id"]]
+        prefix = record["credit_type"]
+        counters[f"{prefix}_arrived"] += record["arrived"]
+        counters[f"{prefix}_transmitted"] += record["transmitted"]
+        counters[f"{prefix}_dropped"] += record["dropped"]
+    fields = (
+        "regular_arrived",
+        "regular_transmitted",
+        "regular_dropped",
+        "tentative_arrived",
+        "tentative_transmitted",
+        "tentative_dropped",
+    )
+    return [
+        {"rotor_id": rotor, **{field: counters[field] for field in fields}}
+        for rotor, counters in sorted(grouped.items())
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("results", type=Path)
@@ -931,6 +1265,10 @@ def main():
         superslice_ns / 1000.0 * cycle_superslices,
     )
     tor_rows = build_tor_rows(flow_rows, parsed["queues"], args.hosts_per_tor)
+    uplink_credit_rows = build_uplink_credit_rows(
+        parsed["type_class_stats"], args.hosts_per_tor
+    )
+    rotor_credit_rows = build_rotor_credit_rows(uplink_credit_rows)
 
     write_csv(args.results / "summary.csv", [summary], list(summary))
     write_csv(args.results / "per_flow.csv", flow_rows, list(flow_rows[0]))
@@ -951,6 +1289,47 @@ def main():
         parsed["flow_credit_scheduler"],
         list(FLOW_SCHEDULER_FIELDS),
     )
+    write_csv(
+        args.results / "per_queue_credit_type_class.csv",
+        parsed["type_class_stats"],
+        list(TYPE_CLASS_FIELDS),
+    )
+    write_csv(
+        args.results / "credit_lifecycle.csv",
+        parsed["lifecycle_stats"],
+        list(LIFECYCLE_FIELDS),
+    )
+    write_csv(
+        args.results / "per_tor_uplink_credit.csv",
+        uplink_credit_rows,
+        [
+            "tor_id",
+            "port_id",
+            "rotor_id",
+            "credit_type",
+            "priority_class",
+            "arrived",
+            "transmitted",
+            "dropped",
+            "tentative_drop",
+            "shaping_drop",
+            "overflow_drop",
+            "max_queue",
+        ],
+    )
+    write_csv(
+        args.results / "per_rotor_credit.csv",
+        rotor_credit_rows,
+        [
+            "rotor_id",
+            "regular_arrived",
+            "regular_transmitted",
+            "regular_dropped",
+            "tentative_arrived",
+            "tentative_transmitted",
+            "tentative_dropped",
+        ],
+    )
 
     print(
         f"Completed: {summary['completed_flows']}/{summary['offered_flows']} "
@@ -968,6 +1347,12 @@ def main():
         f"Credit drop: {summary['credit_drops']}/{summary['generated_credits']} "
         f"({summary['credit_drop_ratio']:.2%}); "
         f"path conditional={summary['path_conditional_credit_drop_ratio']:.2%}"
+    )
+    print(
+        "Regular Credit efficiency: "
+        f"per-NIC-slot={summary['regular_delivered_per_nic_slot']:.6f}, "
+        f"per-network-hop={summary['regular_delivered_per_credit_hop']:.6f}, "
+        f"tentative-slot-share={summary['tentative_nic_slot_share']:.2%}"
     )
     if summary["continued_quantum_ratio"] != "":
         print(
@@ -995,6 +1380,11 @@ def main():
     print(f"Wrote {args.results / 'per_priority_queue.csv'}")
     print(f"Wrote {args.results / 'per_credit_hop.csv'}")
     print(f"Wrote {args.results / 'flow_credit_scheduler.csv'}")
+    print(f"Wrote {args.results / 'per_nic_credit_slot.csv'}")
+    print(f"Wrote {args.results / 'tentative_admission.csv'}")
+    print(f"Wrote {args.results / 'credit_lifecycle.csv'}")
+    print(f"Wrote {args.results / 'per_tor_uplink_credit.csv'}")
+    print(f"Wrote {args.results / 'per_rotor_credit.csv'}")
 
 
 if __name__ == "__main__":

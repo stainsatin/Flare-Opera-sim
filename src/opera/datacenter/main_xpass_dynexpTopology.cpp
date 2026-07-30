@@ -5,6 +5,7 @@
 #include <fstream> // need to read flows
 #include <iostream>
 #include <string.h>
+#include <stdlib.h>
 #include <math.h>
 #include "network.h"
 #include "randomqueue.h"
@@ -47,12 +48,16 @@ void report_credit_stats(DynExpTopology* top) {
          << "current_queued_bytes" << endl;
     cout << "# CreditPriorityStats scope id port priority weight arrivals "
          << "transmitted queued max_queued dropped pushouts" << endl;
+    cout << "# CreditTypeClassStats scope id port credit_type priority arrived "
+         << "transmitted queued max_queued dropped tentative_threshold shaping "
+         << "overflow timeout pushout" << endl;
     for (int host = 0; host < top->no_of_nodes(); host++) {
         CreditQueue* queue = dynamic_cast<CreditQueue*>(
             top->get_queue_serv_tor(host));
         assert(queue);
         queue->reportCreditStats("host", host, -1);
         queue->reportPriorityStats("host", host, -1);
+        queue->reportTypeClassStats("host", host, -1);
         cout << "DataQueueStats host " << host << " -1 "
              << queue->num_drops() << " "
              << queue->max_ever_recorded_size() << " "
@@ -65,6 +70,7 @@ void report_credit_stats(DynExpTopology* top) {
                 top->get_queue_tor(tor, port));
             if (!queue) continue;
             queue->reportCreditStats("tor", tor, port);
+            queue->reportTypeClassStats("tor", tor, port);
             cout << "DataQueueStats tor " << tor << " " << port << " "
                  << queue->num_drops() << " "
                  << queue->max_ever_recorded_size() << " "
@@ -73,6 +79,7 @@ void report_credit_stats(DynExpTopology* top) {
     }
     reportFlowCreditStats();
     reportCreditHopStats();
+    reportCreditLifecycleStats();
     cout << "# TopologyClipStats credit data control other" << endl;
     cout << "TopologyClipStats " << __global_topology_clipped_credits << " "
          << __global_topology_clipped_data << " "
@@ -129,7 +136,11 @@ int main(int argc, char **argv) {
     bool fb_sens = false; //weight feedback adjustment with prob function
     bool is_flare = false; //false=flare, true=xpass
     bool rx_hop_prio = false;
-    bool rx_prio_admit = false;
+    bool rx_global_tentative = false;
+    bool rx_credit_pushout = false;
+    bool rx_credit_slot_trace = false;
+    bool deprecated_rx_prio_admit = false;
+    uint32_t random_seed = 13;
     uint32_t rx_hop_weight_high = 4;
     uint32_t rx_hop_weight_medium = 2;
     uint32_t rx_hop_weight_low = 1;
@@ -183,8 +194,29 @@ int main(int argc, char **argv) {
 	    is_flare = true;
 	} else if (!strcmp(argv[i],"-rxhopprio")){
 	    rx_hop_prio = true;
+	} else if (!strcmp(argv[i],"-rxglobaltentative")){
+	    rx_global_tentative = true;
 	} else if (!strcmp(argv[i],"-rxprioadmit")){
-	    rx_prio_admit = true;
+	    rx_global_tentative = true;
+        deprecated_rx_prio_admit = true;
+	} else if (!strcmp(argv[i],"-rxcreditpushout")){
+	    rx_credit_pushout = true;
+	} else if (!strcmp(argv[i],"-rxcreditslottrace")){
+	    rx_credit_slot_trace = true;
+	} else if (!strcmp(argv[i],"-seed")){
+        if (i + 1 >= argc) {
+            cout << "-seed requires a non-negative integer" << endl;
+            exit(1);
+        }
+        char* end = NULL;
+        unsigned long parsed_seed = strtoul(argv[i+1], &end, 10);
+        if (*argv[i+1] == '\0' || *end != '\0' ||
+            parsed_seed > 0xffffffffUL) {
+            cout << "-seed requires a 32-bit non-negative integer" << endl;
+            exit(1);
+        }
+        random_seed = parsed_seed;
+        i++;
 	} else if (!strcmp(argv[i],"-rxhopweights")){
         if (i + 3 >= argc) {
             cout << "-rxhopweights requires three values: high medium low"
@@ -232,8 +264,8 @@ int main(int argc, char **argv) {
         exit_error(argv[0]);
       i++;
     }
-    fast_srand(13);
-    srand(13);
+    fast_srand(random_seed);
+    srand(random_seed);
 
     if (topfile.empty() || flowfile.empty()) {
         cout << "Both -topfile and -flowfile are required" << endl;
@@ -243,17 +275,30 @@ int main(int argc, char **argv) {
         cout << "-rxhopweights requires -rxhopprio" << endl;
         exit(1);
     }
+    uint64_t weight_sum = (uint64_t)rx_hop_weight_high +
+                          rx_hop_weight_medium + rx_hop_weight_low;
+    if (weight_sum > 100000) {
+        cout << "-rxhopweights sum must not exceed 100000" << endl;
+        exit(1);
+    }
     if (rx_hop_prio) {
         cout << "Receiver hop-priority service: shared NIC Credit buffer "
              << "with WRR weights "
              << rx_hop_weight_high << ":" << rx_hop_weight_medium << ":"
              << rx_hop_weight_low << endl;
     }
-    if (rx_prio_admit) {
-        cout << "Receiver hop-priority admission: class-cumulative "
-             << "tentative/shaping occupancy with regular/tentative-aware "
-             << "push-out" << endl;
+    if (rx_global_tentative) {
+        cout << "Receiver tentative admission: global shared Credit occupancy"
+             << endl;
     }
+    if (deprecated_rx_prio_admit) {
+        cout << "Warning: -rxprioadmit is deprecated; it now aliases "
+             << "-rxglobaltentative and does not enable push-out" << endl;
+    }
+    if (rx_credit_pushout) {
+        cout << "Receiver Credit push-out: enabled independently" << endl;
+    }
+    cout << "Random seed: " << random_seed << endl;
 
     eventlist.setEndtime(timeFromSec(simtime));
     Clock c(timeFromSec(5 / 100.), eventlist);
@@ -281,7 +326,10 @@ int main(int argc, char **argv) {
         {{"cq_size",cred_queuesize},{"sh_thresh",shaping_thresh},
         {"ae_thresh",aeolus_thresh},{"te_thresh",tent_thresh},
         {"rx_hop_prio",rx_hop_prio ? 1U : 0U},
-        {"rx_prio_admit",rx_prio_admit ? 1U : 0U},
+        {"rx_global_tentative",rx_global_tentative ? 1U : 0U},
+        {"rx_credit_pushout",rx_credit_pushout ? 1U : 0U},
+        {"rx_credit_slot_trace",rx_credit_slot_trace ? 1U : 0U},
+        {"priority_seed",random_seed},
         {"rx_hop_weight_high",rx_hop_weight_high},
         {"rx_hop_weight_medium",rx_hop_weight_medium},
         {"rx_hop_weight_low",rx_hop_weight_low}};

@@ -19,6 +19,11 @@ COMPARE_SPEC = importlib.util.spec_from_file_location(
 )
 COMPARE = importlib.util.module_from_spec(COMPARE_SPEC)
 COMPARE_SPEC.loader.exec_module(COMPARE)
+SUMMARY_SPEC = importlib.util.spec_from_file_location(
+    "opera_24tor_rcdcp_summary", HERE / "summarize_seeds.py"
+)
+SUMMARY = importlib.util.module_from_spec(SUMMARY_SPEC)
+SUMMARY_SPEC.loader.exec_module(SUMMARY)
 
 
 class OperaTwentyFourTorLighterExperimentTest(unittest.TestCase):
@@ -101,33 +106,35 @@ class OperaTwentyFourTorLighterExperimentTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             FLOWS.build_flows(base_start_ns=54_000)
 
-    def test_run_script_uses_four_independent_priority_modes(self):
+    def test_run_script_uses_multiseed_rcdcp_modes(self):
         script = (HERE / "run.sh").read_text(encoding="ascii")
         self.assertIn("SIMTIME=0.02", script)
         self.assertIn("FLOW_SIZE_MIB=2", script)
         self.assertIn("START_SUPERSLICES=8", script)
-        self.assertIn("RX_HOP_WEIGHTS=8:2:1", script)
+        self.assertIn("SEEDS=1,2,3,4,5", script)
         self.assertIn("CWND=4", script)
-        self.assertIn("results_4x2MiB_stagger8_w821_admission", script)
+        self.assertIn("results_rcdcp_4x2MiB_stagger8", script)
         self.assertIn('FLOW_GENERATOR="${SCRIPT_DIR}/generate_flows.py"', script)
         self.assertIn("--flow-generator", script)
         self.assertIn('python3 "${FLOW_GENERATOR}"', script)
-        self.assertIn("run_case fifo", script)
-        self.assertIn("run_case wrr", script)
-        self.assertIn("run_case admission", script)
-        self.assertIn("run_case combined", script)
-        self.assertIn("priority_args=(-rxhopprio -rxhopweights", script)
-        self.assertIn("priority_args=(-rxprioadmit)", script)
-        self.assertIn("-rxprioadmit)", script)
-        self.assertIn('--scheduler MODE          fifo, wrr, admission, combined, or all', script)
+        for mode in ("fifo_original", "fifo_global", "wrr421", "wrr821"):
+            self.assertIn(mode, script)
+        self.assertIn("-rxglobaltentative -rxhopprio -rxhopweights 4 2 1", script)
+        self.assertIn("-rxglobaltentative -rxhopprio -rxhopweights 8 2 1", script)
+        self.assertIn("-rxcreditslottrace", script)
+        self.assertIn("summarize_seeds.py", script)
+        self.assertIn('--mode MODE               fifo_original, fifo_global, wrr421, wrr821, or all', script)
         self.assertIn("opera_24tor_4host_55us.txt", script)
         self.assertTrue(
             (ROOT / "topologies" / "opera_24tor_4host_55us.txt").is_file()
         )
 
-    def test_four_way_comparison_tracks_acceptance_metrics(self):
+    def test_four_way_comparison_tracks_rcdcp_efficiency(self):
         comparer = (HERE / "compare.py").read_text(encoding="ascii")
-        self.assertIn('CASES = ("fifo", "wrr", "admission", "combined")', comparer)
+        self.assertIn(
+            'CASES = ("fifo_original", "fifo_global", "wrr421", "wrr821")',
+            comparer,
+        )
         for metric in (
             "mean_admitted_credit_path_hops",
             "mean_delivered_credit_path_hops",
@@ -136,18 +143,36 @@ class OperaTwentyFourTorLighterExperimentTest(unittest.TestCase):
             "tor_queue_credit_drops",
             "total_credit_network_link_bytes",
             "mean_fct_ms",
+            "regular_delivered_per_nic_slot",
+            "regular_delivered_per_credit_hop",
+            "tentative_nic_slot_share",
         ):
             self.assertIn(metric, comparer)
 
         summaries = {
-            "fifo": {"mean_fct_ms": "4.0"},
-            "wrr": {"mean_fct_ms": "3.5"},
-            "admission": {"mean_fct_ms": "3.0"},
-            "combined": {"mean_fct_ms": "2.5"},
+            "fifo_original": {"mean_fct_ms": "4.0"},
+            "fifo_global": {"mean_fct_ms": "3.5"},
+            "wrr421": {"mean_fct_ms": "3.0"},
+            "wrr821": {"mean_fct_ms": "2.5"},
         }
         rows = {row["metric"]: row for row in COMPARE.compare_summaries(summaries)}
-        self.assertEqual(rows["mean_fct_ms"]["best"], "combined")
-        self.assertEqual(rows["mean_fct_ms"]["admission_delta_vs_fifo"], -1.0)
+        self.assertEqual(rows["mean_fct_ms"]["best"], "wrr821")
+        self.assertEqual(rows["mean_fct_ms"]["wrr421_delta_vs_fifo"], -1.0)
+
+    def test_multiseed_summary_statistics(self):
+        values = [1.0, 2.0, 3.0, 4.0, 5.0]
+        self.assertEqual(SUMMARY.aggregate(values, "mean"), 3.0)
+        self.assertAlmostEqual(SUMMARY.aggregate(values, "stddev"), 2.5 ** 0.5)
+        self.assertAlmostEqual(
+            SUMMARY.aggregate(values, "ci95"), 2.776 * (2.5 ** 0.5) / (5 ** 0.5)
+        )
+        for metric in (
+            "regular_delivered_per_nic_slot",
+            "regular_delivered_per_credit_hop",
+            "tentative_slot_share",
+            "active_throughput",
+        ):
+            self.assertIn(metric, SUMMARY.METRICS)
 
 
 if __name__ == "__main__":
