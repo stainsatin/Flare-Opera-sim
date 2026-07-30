@@ -52,6 +52,15 @@ struct FlowCreditCounters {
 void reportFlowCreditStats();
 void reportCreditHopStats();
 void reportCreditLifecycleStats();
+void configureCreditTimeSeries(DynExpTopology* top, bool enabled);
+void recordCreditGenerationRate(DynExpTopology* top, simtime_picosec time,
+                                double regular_probability);
+void recordCreditFeedbackWindow(DynExpTopology* top, simtime_picosec time,
+                                uint64_t regular_credits,
+                                uint64_t regular_drops,
+                                double measured_loss, double target_loss,
+                                double rate_before, double rate_after);
+void reportCreditTimeSeriesStats();
 void recordFlowCreditDelivery(Packet& pkt);
 void recordFlowCreditTopologyDrop(Packet& pkt, uint32_t consumed_hops,
                                   bool wrong_destination = false);

@@ -80,6 +80,7 @@ void report_credit_stats(DynExpTopology* top) {
     reportFlowCreditStats();
     reportCreditHopStats();
     reportCreditLifecycleStats();
+    reportCreditTimeSeriesStats();
     cout << "# TopologyClipStats credit data control other" << endl;
     cout << "TopologyClipStats " << __global_topology_clipped_credits << " "
          << __global_topology_clipped_data << " "
@@ -139,6 +140,7 @@ int main(int argc, char **argv) {
     bool rx_global_tentative = false;
     bool rx_credit_pushout = false;
     bool rx_credit_slot_trace = false;
+    bool rx_credit_time_series = false;
     bool deprecated_rx_prio_admit = false;
     uint32_t random_seed = 13;
     uint32_t rx_hop_weight_high = 4;
@@ -203,6 +205,8 @@ int main(int argc, char **argv) {
 	    rx_credit_pushout = true;
 	} else if (!strcmp(argv[i],"-rxcreditslottrace")){
 	    rx_credit_slot_trace = true;
+	} else if (!strcmp(argv[i],"-rxcredittimeseries")){
+	    rx_credit_time_series = true;
 	} else if (!strcmp(argv[i],"-seed")){
         if (i + 1 >= argc) {
             cout << "-seed requires a non-negative integer" << endl;
@@ -298,6 +302,10 @@ int main(int argc, char **argv) {
     if (rx_credit_pushout) {
         cout << "Receiver Credit push-out: enabled independently" << endl;
     }
+    if (rx_credit_time_series) {
+        cout << "Receiver Credit time series: one aggregate per Opera "
+             << "superslice" << endl;
+    }
     cout << "Random seed: " << random_seed << endl;
 
     eventlist.setEndtime(timeFromSec(simtime));
@@ -336,6 +344,7 @@ int main(int argc, char **argv) {
     DynExpTopology* top = new DynExpTopology(queuesize, &logfile, &eventlist, 
         CREDIT, topfile, params);
     top->set_prob_hops(hops_to_prob);
+    configureCreditTimeSeries(top, rx_credit_time_series);
 
     // initialize all sources/sinks
     XPassSrc::setMinRTO(1000); //increase RTO to avoid spurious retransmits

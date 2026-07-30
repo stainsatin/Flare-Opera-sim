@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <iomanip>
 #include <math.h>
 #include <map>
 #include <vector>
@@ -62,6 +63,88 @@ struct CreditLifecycleCounters {
 
 static CreditLifecycleCounters credit_lifecycle_counters[2][3];
 
+struct CreditTimeSeriesCounters {
+  uint64_t stage[2][CREDIT_STAGE_N] = {{0}};
+  uint64_t cohort_delivered[2] = {0, 0};
+  uint64_t cohort_endpoint_drop[2] = {0, 0};
+  uint64_t cohort_path_drop[2] = {0, 0};
+  uint64_t endpoint_drop[2] = {0, 0};
+  uint64_t path_drop[2] = {0, 0};
+  long double regular_probability_sum = 0;
+  uint64_t rate_samples = 0;
+  uint64_t feedback_updates = 0;
+  uint64_t feedback_regular_credits = 0;
+  uint64_t feedback_regular_drops = 0;
+  long double feedback_measured_loss_sum = 0;
+  long double feedback_target_loss_sum = 0;
+  long double feedback_rate_before_sum = 0;
+  long double feedback_rate_after_sum = 0;
+  uint64_t feedback_increases = 0;
+  uint64_t feedback_decreases = 0;
+};
+
+static bool credit_time_series_enabled = false;
+static DynExpTopology* credit_time_series_topology = NULL;
+static map<int64_t, CreditTimeSeriesCounters> credit_time_series_counters;
+
+static CreditTimeSeriesCounters* timeSeriesCounters(DynExpTopology* top,
+                                                     simtime_picosec time) {
+  if (!credit_time_series_enabled) return NULL;
+  assert(top != NULL);
+  assert(top == credit_time_series_topology);
+  simtime_picosec superslice_time = top->get_slicetime(3);
+  assert(superslice_time > 0);
+  return &credit_time_series_counters[time / superslice_time];
+}
+
+static CreditTimeSeriesCounters* timeSeriesCounters(Packet& pkt) {
+  DynExpTopology* top = pkt.get_topology();
+  return timeSeriesCounters(top, top->eventlist->now());
+}
+
+static CreditTimeSeriesCounters* cohortTimeSeriesCounters(Packet& pkt) {
+  if (!credit_time_series_enabled) return NULL;
+  int64_t superslice = ((XPassPull&)pkt).generation_superslice();
+  assert(superslice >= 0);
+  return &credit_time_series_counters[superslice];
+}
+
+void configureCreditTimeSeries(DynExpTopology* top, bool enabled) {
+  credit_time_series_enabled = enabled;
+  credit_time_series_topology = enabled ? top : NULL;
+  credit_time_series_counters.clear();
+}
+
+void recordCreditGenerationRate(DynExpTopology* top, simtime_picosec time,
+                                double regular_probability) {
+  CreditTimeSeriesCounters* counters = timeSeriesCounters(top, time);
+  if (counters == NULL) return;
+  assert(regular_probability >= 0.0 && regular_probability <= 1.0);
+  counters->regular_probability_sum += regular_probability;
+  counters->rate_samples++;
+}
+
+void recordCreditFeedbackWindow(DynExpTopology* top, simtime_picosec time,
+                                uint64_t regular_credits,
+                                uint64_t regular_drops,
+                                double measured_loss, double target_loss,
+                                double rate_before, double rate_after) {
+  CreditTimeSeriesCounters* counters = timeSeriesCounters(top, time);
+  if (counters == NULL) return;
+  assert(regular_drops <= regular_credits);
+  counters->feedback_updates++;
+  counters->feedback_regular_credits += regular_credits;
+  counters->feedback_regular_drops += regular_drops;
+  counters->feedback_measured_loss_sum += measured_loss;
+  counters->feedback_target_loss_sum += target_loss;
+  counters->feedback_rate_before_sum += rate_before;
+  counters->feedback_rate_after_sum += rate_after;
+  if (rate_after > rate_before)
+    counters->feedback_increases++;
+  else if (rate_after < rate_before)
+    counters->feedback_decreases++;
+}
+
 static int rawCreditClass(Packet& pkt) {
   int hops = max(pkt.get_maxhops(), 0);
   if (hops <= 1) return 0;
@@ -80,6 +163,12 @@ static CreditLifecycleCounters& lifecycleCounters(Packet& pkt) {
 
 static void recordCreditStage(Packet& pkt, CreditLifecycleStage stage) {
   lifecycleCounters(pkt).stage[stage]++;
+  CreditTimeSeriesCounters* counters = timeSeriesCounters(pkt);
+  if (counters != NULL) counters->stage[rawCreditType(pkt)][stage]++;
+  if (stage == CREDIT_DELIVERED) {
+    CreditTimeSeriesCounters* cohort = cohortTimeSeriesCounters(pkt);
+    if (cohort != NULL) cohort->cohort_delivered[rawCreditType(pkt)]++;
+  }
 }
 
 static void recordCreditLifecycleDrop(Packet& pkt, bool endpoint,
@@ -91,6 +180,22 @@ static void recordCreditLifecycleDrop(Packet& pkt, bool endpoint,
   } else {
     counters.path_dropped++;
     counters.path_reason[reason]++;
+  }
+  CreditTimeSeriesCounters* time_counters = timeSeriesCounters(pkt);
+  if (time_counters != NULL) {
+    uint32_t type = rawCreditType(pkt);
+    if (endpoint)
+      time_counters->endpoint_drop[type]++;
+    else
+      time_counters->path_drop[type]++;
+  }
+  CreditTimeSeriesCounters* cohort = cohortTimeSeriesCounters(pkt);
+  if (cohort != NULL) {
+    uint32_t type = rawCreditType(pkt);
+    if (endpoint)
+      cohort->cohort_endpoint_drop[type]++;
+    else
+      cohort->cohort_path_drop[type]++;
   }
 }
 
@@ -1065,6 +1170,61 @@ void reportCreditLifecycleStats() {
            << counters.network_hops << endl;
     }
   }
+}
+
+void reportCreditTimeSeriesStats() {
+  if (!credit_time_series_enabled) return;
+  assert(credit_time_series_topology != NULL);
+  cout << "# CreditTimeSeries absolute_superslice start_ps end_ps "
+       << "regular_generated tentative_generated regular_admitted "
+       << "tentative_admitted regular_sent tentative_sent "
+       << "regular_delivered tentative_delivered regular_endpoint_drop "
+       << "tentative_endpoint_drop regular_path_drop tentative_path_drop "
+       << "regular_cohort_delivered tentative_cohort_delivered "
+       << "regular_cohort_endpoint_drop tentative_cohort_endpoint_drop "
+       << "regular_cohort_path_drop tentative_cohort_path_drop "
+       << "regular_probability_sum rate_samples feedback_updates "
+       << "feedback_regular_credits feedback_regular_drops "
+       << "feedback_measured_loss_sum feedback_target_loss_sum "
+       << "feedback_rate_before_sum feedback_rate_after_sum "
+       << "feedback_increases feedback_decreases" << endl;
+  simtime_picosec superslice_time =
+      credit_time_series_topology->get_slicetime(3);
+  std::streamsize previous_precision = cout.precision();
+  cout << setprecision(17);
+  for (map<int64_t, CreditTimeSeriesCounters>::const_iterator it =
+           credit_time_series_counters.begin();
+       it != credit_time_series_counters.end(); ++it) {
+    const CreditTimeSeriesCounters& counters = it->second;
+    simtime_picosec start = it->first * superslice_time;
+    cout << "CreditTimeSeries " << it->first << " " << start << " "
+         << start + superslice_time;
+    for (int stage = CREDIT_GENERATED; stage < CREDIT_STAGE_N; stage++)
+      for (int type = 0; type < 2; type++)
+        cout << " " << counters.stage[type][stage];
+    cout << " " << counters.endpoint_drop[0]
+         << " " << counters.endpoint_drop[1]
+         << " " << counters.path_drop[0]
+         << " " << counters.path_drop[1]
+         << " " << counters.cohort_delivered[0]
+         << " " << counters.cohort_delivered[1]
+         << " " << counters.cohort_endpoint_drop[0]
+         << " " << counters.cohort_endpoint_drop[1]
+         << " " << counters.cohort_path_drop[0]
+         << " " << counters.cohort_path_drop[1]
+         << " " << (double)counters.regular_probability_sum
+         << " " << counters.rate_samples
+         << " " << counters.feedback_updates
+         << " " << counters.feedback_regular_credits
+         << " " << counters.feedback_regular_drops
+         << " " << (double)counters.feedback_measured_loss_sum
+         << " " << (double)counters.feedback_target_loss_sum
+         << " " << (double)counters.feedback_rate_before_sum
+         << " " << (double)counters.feedback_rate_after_sum
+         << " " << counters.feedback_increases
+         << " " << counters.feedback_decreases << endl;
+  }
+  cout.precision(previous_precision);
 }
 
 void CreditQueue::reportMaxqueuesize() {

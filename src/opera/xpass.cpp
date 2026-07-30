@@ -838,6 +838,7 @@ XPassSink::decJitter() {
 void
 XPassSink::feedbackControl2() {
   if(_tot_credits == 0) return;
+  uint64_t rate_before = _crt_rate;
   int hops = hopJitter(max(_crt_hops,1));
   double credit_loss = (double)_drop_credits / _tot_credits;
   double target_loss = (1.0 - (long double)_crt_rate/_max_rate) * _target_loss;
@@ -866,6 +867,11 @@ XPassSink::feedbackControl2() {
     _weight = max(_weight/_weight_factor, _min_weight);
     _is_increasing = false;
   }
+  recordCreditFeedbackWindow(
+      _src->_top, eventlist().now(), _tot_credits, _drop_credits,
+      credit_loss, target_loss,
+      (long double)rate_before / _max_rate,
+      (long double)_crt_rate / _max_rate);
   //cout << "Flow " << flow_id() << " loss " << credit_loss << " sent " << _tot_credits << " tot_lost " << _drop_credits << " rate " << _crt_rate/1E9 <<  " hops " << _crt_hops << " t " << eventlist().now() << " rtt " << _rtt << endl;
   _tot_recvd_pkts = 0;
   _bw_sent_creds = 0;
@@ -984,8 +990,11 @@ XPassPull* XPassSink::emitCredit() {
   p->set_flow_id(_src->flow_id());
   p->set_path_index(_src->_path_index);
   p->set_packetid(id_gen++);
+  p->set_generation_superslice(
+      eventlist().now() / _src->_top->get_slicetime(3));
+  double rate = 1.0;
   if(_is_flare){
-      double rate = min((long double)1.0, (long double)_crt_rate/_max_rate);
+      rate = min((long double)1.0, (long double)_crt_rate/_max_rate);
       if(drand() <= rate) {
           p->set_tentative(false);
           p->set_pacerno(_credit_counter++);
@@ -1009,6 +1018,7 @@ XPassPull* XPassSink::emitCredit() {
       p->set_pacerno(_credit_counter++);
       __global_network_tot_valid_creds++;
   }
+  recordCreditGenerationRate(_src->_top, eventlist().now(), rate);
   sendToNIC(p);
   decJitter();
   if(!_src->_finished) {

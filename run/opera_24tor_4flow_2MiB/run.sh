@@ -24,6 +24,7 @@ TENTATIVE_QUEUE=4
 OUTPUT_ROOT="${SCRIPT_DIR}/results_rcdcp_4x2MiB_stagger8"
 BUILD=auto
 SLOT_TRACE=yes
+CREDIT_TIME_SERIES=no
 
 usage() {
     cat <<'EOF'
@@ -47,6 +48,8 @@ Options:
   --flow-generator FILE     Compatible workload generator
   --topology FILE           Compatible 96-host, 24-ToR Opera topology
   --no-slot-trace           Skip event-level NIC/admission trace lines
+  --credit-timeseries       Aggregate Credit/feedback state per superslice;
+                            applied only to FIFO modes
   --output DIR              Root directory for all seed/mode results
   --build                   Clean-build the dynamic Opera executable
   --no-build                Require an existing executable
@@ -82,6 +85,7 @@ while [[ $# -gt 0 ]]; do
         --flow-generator) FLOW_GENERATOR="$2"; shift 2 ;;
         --topology) TOPOLOGY="$2"; shift 2 ;;
         --no-slot-trace) SLOT_TRACE=no; shift ;;
+        --credit-timeseries) CREDIT_TIME_SERIES=yes; shift ;;
         --output) OUTPUT_ROOT="$2"; shift 2 ;;
         --build) BUILD=yes; shift ;;
         --no-build) BUILD=no; shift ;;
@@ -153,6 +157,10 @@ run_case() {
     while IFS= read -r arg; do priority_args+=("${arg}"); done < <(case_args "${case_name}")
     local trace_args=()
     [[ "${SLOT_TRACE}" == yes ]] && trace_args=(-rxcreditslottrace)
+    local time_series_args=()
+    if [[ "${CREDIT_TIME_SERIES}" == yes && "${case_name}" == fifo_* ]]; then
+        time_series_args=(-rxcredittimeseries)
+    fi
 
     mkdir -p "${case_dir}/traffic"
     cp "${SHARED_FLOWFILE}" "${case_dir}/traffic/uniform.htsim"
@@ -163,7 +171,7 @@ run_case() {
         -qshaping "${SHAPING_QUEUE}" -aeolus "${AEOLUS_QUEUE}"
         -tent "${TENTATIVE_QUEUE}" -winit 1.0 -tloss 0.1 -fbw 1.2
         -jita 4 -jitb 16 -fbsens
-        "${priority_args[@]}" "${trace_args[@]}"
+        "${priority_args[@]}" "${trace_args[@]}" "${time_series_args[@]}"
         -probfile "${PROBFILE}" -topfile "${TOPOLOGY}"
         -flowfile "${case_dir}/traffic/uniform.htsim"
         -o "${case_dir}/uniform.htsim"

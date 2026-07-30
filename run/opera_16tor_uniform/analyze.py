@@ -163,6 +163,92 @@ TENTATIVE_ADMISSION_FIELDS = (
     "tentative_threshold",
     "decision",
 )
+CREDIT_TIME_SERIES_FIELDS = (
+    "absolute_superslice",
+    "start_ps",
+    "end_ps",
+    "regular_generated",
+    "tentative_generated",
+    "regular_admitted",
+    "tentative_admitted",
+    "regular_sent",
+    "tentative_sent",
+    "regular_delivered",
+    "tentative_delivered",
+    "regular_endpoint_drop",
+    "tentative_endpoint_drop",
+    "regular_path_drop",
+    "tentative_path_drop",
+    "regular_cohort_delivered",
+    "tentative_cohort_delivered",
+    "regular_cohort_endpoint_drop",
+    "tentative_cohort_endpoint_drop",
+    "regular_cohort_path_drop",
+    "tentative_cohort_path_drop",
+    "regular_probability_sum",
+    "rate_samples",
+    "feedback_updates",
+    "feedback_regular_credits",
+    "feedback_regular_drops",
+    "feedback_measured_loss_sum",
+    "feedback_target_loss_sum",
+    "feedback_rate_before_sum",
+    "feedback_rate_after_sum",
+    "feedback_increases",
+    "feedback_decreases",
+)
+CREDIT_TIME_SERIES_FLOAT_FIELDS = {
+    "regular_probability_sum",
+    "feedback_measured_loss_sum",
+    "feedback_target_loss_sum",
+    "feedback_rate_before_sum",
+    "feedback_rate_after_sum",
+}
+CREDIT_TIME_SERIES_OUTPUT_FIELDS = (
+    *CREDIT_TIME_SERIES_FIELDS,
+    "start_ms",
+    "end_ms",
+    "active_flows_midpoint",
+    "generated_total",
+    "tentative_generated_share",
+    "mean_regular_probability",
+    "expected_tentative_share",
+    "tentative_share_minus_expected",
+    "regular_endpoint_drop_event_ratio",
+    "regular_path_drop_event_ratio",
+    "regular_total_drop_event_ratio",
+    "tentative_endpoint_drop_event_ratio",
+    "tentative_path_drop_event_ratio",
+    "regular_cohort_resolved",
+    "regular_cohort_pending",
+    "regular_cohort_drop_ratio_resolved",
+    "regular_cohort_endpoint_drop_ratio_resolved",
+    "regular_cohort_path_drop_ratio_resolved",
+    "regular_cohort_drop_ratio_generated",
+    "tentative_cohort_resolved",
+    "tentative_cohort_pending",
+    "tentative_cohort_drop_ratio_resolved",
+    "tentative_cohort_endpoint_drop_ratio_resolved",
+    "tentative_cohort_path_drop_ratio_resolved",
+    "tentative_cohort_drop_ratio_generated",
+    "feedback_regular_loss_ratio",
+    "mean_feedback_measured_loss",
+    "mean_feedback_target_loss",
+    "mean_feedback_rate_before",
+    "mean_feedback_rate_after",
+    "mean_feedback_rate_delta",
+)
+CREDIT_TIME_SERIES_LAG_FIELDS = (
+    "lag_superslices",
+    "lag_us",
+    "feedback_pairs",
+    "feedback_loss_to_future_tentative_share_corr",
+    "feedback_rate_after_to_future_tentative_share_corr",
+    "path_drop_pairs",
+    "regular_path_drop_to_future_tentative_share_corr",
+    "protection_pairs",
+    "tentative_share_to_future_regular_cohort_drop_corr",
+)
 MSS_BYTES = 1436
 HOST_RATE_GBPS = 100.0
 FLOW_SCHEDULER_FIELDS = (
@@ -200,6 +286,25 @@ def write_csv(path, rows, fieldnames):
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def safe_ratio(numerator, denominator):
+    return numerator / denominator if denominator else ""
+
+
+def pearson_correlation(pairs):
+    if len(pairs) < 2:
+        return ""
+    xs = [pair[0] for pair in pairs]
+    ys = [pair[1] for pair in pairs]
+    mean_x = statistics.fmean(xs)
+    mean_y = statistics.fmean(ys)
+    covariance = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
+    variance_x = sum((x - mean_x) ** 2 for x in xs)
+    variance_y = sum((y - mean_y) ** 2 for y in ys)
+    if variance_x == 0 or variance_y == 0:
+        return ""
+    return covariance / math.sqrt(variance_x * variance_y)
 
 
 def parse_trace(path, hosts_per_tor, tor_count, superslice_ns):
@@ -248,6 +353,7 @@ def parse_log(path):
     credit_hop_stats = []
     type_class_stats = []
     lifecycle_stats = []
+    credit_time_series = []
     nic_slot_totals = defaultdict(int)
     tentative_admission_totals = defaultdict(int)
     unfinished_markers = set()
@@ -464,6 +570,12 @@ def parse_log(path):
                     }
                 )
                 lifecycle_stats.append(record)
+            elif fields[0] == "CreditTimeSeries" and len(fields) >= 33:
+                record = dict(zip(CREDIT_TIME_SERIES_FIELDS, fields[1:33]))
+                for name in CREDIT_TIME_SERIES_FIELDS:
+                    converter = float if name in CREDIT_TIME_SERIES_FLOAT_FIELDS else int
+                    record[name] = converter(record[name])
+                credit_time_series.append(record)
             elif fields[0] == "TopologyClipStats" and len(fields) >= 5:
                 topology_clip = dict(
                     zip(topology_clip, (int(value) for value in fields[1:5]))
@@ -503,12 +615,169 @@ def parse_log(path):
         "credit_hop_stats": credit_hop_stats,
         "type_class_stats": type_class_stats,
         "lifecycle_stats": lifecycle_stats,
+        "credit_time_series": credit_time_series,
         "nic_slot_totals": dict(nic_slot_totals),
         "tentative_admission_totals": dict(tentative_admission_totals),
         "unfinished_markers": unfinished_markers,
         "topology_clip": topology_clip,
         "topology_wrong_dst": topology_wrong_dst,
     }
+
+
+def build_credit_time_series(parsed, flow_rows, superslice_ns, max_lag=8):
+    rows = []
+    for source in sorted(
+        parsed.get("credit_time_series", []),
+        key=lambda row: row["absolute_superslice"],
+    ):
+        row = dict(source)
+        row["start_ms"] = row["start_ps"] / 1e9
+        row["end_ms"] = row["end_ps"] / 1e9
+        midpoint_ms = (row["start_ms"] + row["end_ms"]) / 2
+        row["active_flows_midpoint"] = sum(
+            flow["start_ms"] <= midpoint_ms
+            and (not flow["completed"] or midpoint_ms < flow["finish_ms"])
+            for flow in flow_rows
+        )
+        generated_total = row["regular_generated"] + row["tentative_generated"]
+        row["generated_total"] = generated_total
+        row["tentative_generated_share"] = safe_ratio(
+            row["tentative_generated"], generated_total
+        )
+        row["mean_regular_probability"] = safe_ratio(
+            row["regular_probability_sum"], row["rate_samples"]
+        )
+        row["expected_tentative_share"] = (
+            1 - row["mean_regular_probability"]
+            if row["mean_regular_probability"] != ""
+            else ""
+        )
+        row["tentative_share_minus_expected"] = (
+            row["tentative_generated_share"] - row["expected_tentative_share"]
+            if row["tentative_generated_share"] != ""
+            and row["expected_tentative_share"] != ""
+            else ""
+        )
+        row["regular_endpoint_drop_event_ratio"] = safe_ratio(
+            row["regular_endpoint_drop"], row["regular_generated"]
+        )
+        row["regular_path_drop_event_ratio"] = safe_ratio(
+            row["regular_path_drop"], row["regular_sent"]
+        )
+        row["regular_total_drop_event_ratio"] = safe_ratio(
+            row["regular_endpoint_drop"] + row["regular_path_drop"],
+            row["regular_generated"],
+        )
+        row["tentative_endpoint_drop_event_ratio"] = safe_ratio(
+            row["tentative_endpoint_drop"], row["tentative_generated"]
+        )
+        row["tentative_path_drop_event_ratio"] = safe_ratio(
+            row["tentative_path_drop"], row["tentative_sent"]
+        )
+        for credit_type in ("regular", "tentative"):
+            resolved = (
+                row[f"{credit_type}_cohort_delivered"]
+                + row[f"{credit_type}_cohort_endpoint_drop"]
+                + row[f"{credit_type}_cohort_path_drop"]
+            )
+            cohort_drops = (
+                row[f"{credit_type}_cohort_endpoint_drop"]
+                + row[f"{credit_type}_cohort_path_drop"]
+            )
+            row[f"{credit_type}_cohort_resolved"] = resolved
+            row[f"{credit_type}_cohort_pending"] = max(
+                row[f"{credit_type}_generated"] - resolved, 0
+            )
+            row[f"{credit_type}_cohort_drop_ratio_resolved"] = safe_ratio(
+                cohort_drops, resolved
+            )
+            row[f"{credit_type}_cohort_endpoint_drop_ratio_resolved"] = safe_ratio(
+                row[f"{credit_type}_cohort_endpoint_drop"], resolved
+            )
+            row[f"{credit_type}_cohort_path_drop_ratio_resolved"] = safe_ratio(
+                row[f"{credit_type}_cohort_path_drop"], resolved
+            )
+            row[f"{credit_type}_cohort_drop_ratio_generated"] = safe_ratio(
+                cohort_drops, row[f"{credit_type}_generated"]
+            )
+        row["feedback_regular_loss_ratio"] = safe_ratio(
+            row["feedback_regular_drops"], row["feedback_regular_credits"]
+        )
+        updates = row["feedback_updates"]
+        for output_name, sum_name in (
+            ("mean_feedback_measured_loss", "feedback_measured_loss_sum"),
+            ("mean_feedback_target_loss", "feedback_target_loss_sum"),
+            ("mean_feedback_rate_before", "feedback_rate_before_sum"),
+            ("mean_feedback_rate_after", "feedback_rate_after_sum"),
+        ):
+            row[output_name] = safe_ratio(row[sum_name], updates)
+        row["mean_feedback_rate_delta"] = (
+            row["mean_feedback_rate_after"] - row["mean_feedback_rate_before"]
+            if row["mean_feedback_rate_after"] != ""
+            and row["mean_feedback_rate_before"] != ""
+            else ""
+        )
+        rows.append(row)
+
+    if not rows:
+        return [], []
+
+    by_slice = {row["absolute_superslice"]: row for row in rows}
+    lag_rows = []
+    for lag in range(max_lag + 1):
+        feedback_loss_pairs = []
+        feedback_rate_pairs = []
+        path_drop_pairs = []
+        protection_pairs = []
+        for absolute_slice, current in by_slice.items():
+            future = by_slice.get(absolute_slice + lag)
+            if future is None or future["tentative_generated_share"] == "":
+                continue
+            future_share = future["tentative_generated_share"]
+            if current["feedback_regular_loss_ratio"] != "":
+                feedback_loss_pairs.append(
+                    (current["feedback_regular_loss_ratio"], future_share)
+                )
+            if current["mean_feedback_rate_after"] != "":
+                feedback_rate_pairs.append(
+                    (current["mean_feedback_rate_after"], future_share)
+                )
+            if current["regular_path_drop_event_ratio"] != "":
+                path_drop_pairs.append(
+                    (current["regular_path_drop_event_ratio"], future_share)
+                )
+            if (
+                current["tentative_generated_share"] != ""
+                and future["regular_cohort_drop_ratio_resolved"] != ""
+            ):
+                protection_pairs.append(
+                    (
+                        current["tentative_generated_share"],
+                        future["regular_cohort_drop_ratio_resolved"],
+                    )
+                )
+        lag_rows.append(
+            {
+                "lag_superslices": lag,
+                "lag_us": lag * superslice_ns / 1000.0,
+                "feedback_pairs": len(feedback_loss_pairs),
+                "feedback_loss_to_future_tentative_share_corr": pearson_correlation(
+                    feedback_loss_pairs
+                ),
+                "feedback_rate_after_to_future_tentative_share_corr": pearson_correlation(
+                    feedback_rate_pairs
+                ),
+                "path_drop_pairs": len(path_drop_pairs),
+                "regular_path_drop_to_future_tentative_share_corr": pearson_correlation(
+                    path_drop_pairs
+                ),
+                "protection_pairs": len(protection_pairs),
+                "tentative_share_to_future_regular_cohort_drop_corr": pearson_correlation(
+                    protection_pairs
+                ),
+            }
+        )
+    return rows, lag_rows
 
 
 def build_flow_rows(trace, parsed):
@@ -1253,6 +1522,9 @@ def main():
     )
     parsed = parse_log(log_path)
     flow_rows = build_flow_rows(trace, parsed)
+    credit_time_rows, credit_time_lag_rows = build_credit_time_series(
+        parsed, flow_rows, superslice_ns
+    )
     credit_hop_rows = build_credit_hop_rows(parsed)
     add_queue_labels(parsed["queues"], args.hosts_per_tor)
     add_priority_queue_labels(parsed["priority_queues"], args.hosts_per_tor)
@@ -1330,6 +1602,16 @@ def main():
             "tentative_dropped",
         ],
     )
+    write_csv(
+        args.results / "credit_timeseries.csv",
+        credit_time_rows,
+        list(CREDIT_TIME_SERIES_OUTPUT_FIELDS),
+    )
+    write_csv(
+        args.results / "credit_timeseries_lag.csv",
+        credit_time_lag_rows,
+        list(CREDIT_TIME_SERIES_LAG_FIELDS),
+    )
 
     print(
         f"Completed: {summary['completed_flows']}/{summary['offered_flows']} "
@@ -1385,6 +1667,8 @@ def main():
     print(f"Wrote {args.results / 'credit_lifecycle.csv'}")
     print(f"Wrote {args.results / 'per_tor_uplink_credit.csv'}")
     print(f"Wrote {args.results / 'per_rotor_credit.csv'}")
+    print(f"Wrote {args.results / 'credit_timeseries.csv'}")
+    print(f"Wrote {args.results / 'credit_timeseries_lag.csv'}")
 
 
 if __name__ == "__main__":

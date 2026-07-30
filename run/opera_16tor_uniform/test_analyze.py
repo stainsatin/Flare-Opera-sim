@@ -26,6 +26,8 @@ TentativeAdmission 900 4 0 3 1 high 1 1 0 2 4 admit
 CreditTypeClassStats tor 1 4 tentative high 40 25 0 12 15 10 2 3 0 0
 CreditLifecycleStats regular high 60 58 55 50 2 5 0 1 1 0 0 0 2 1 1 1 100
 CreditLifecycleStats tentative high 40 35 35 20 5 15 4 1 0 0 0 10 3 1 1 0 70
+CreditTimeSeries 0 0 55000000 60 40 55 20 50 20 30 10 5 20 15 10 30 10 5 20 15 10 60.0 100 2 50 10 0.4 0.2 1.5 1.2 0 2
+CreditTimeSeries 1 55000000 110000000 40 60 35 30 30 25 20 15 5 30 10 10 20 15 5 30 10 10 35.0 100 2 40 16 0.8 0.3 1.2 0.8 0 2
 TopologyClipStats 5 2 1 0
 TopologyWrongDstStats 0 1 0 0
 """
@@ -56,6 +58,30 @@ TopologyWrongDstStats 0 1 0 0
         self.assertEqual(len(parsed["lifecycle_stats"]), 2)
         self.assertEqual(parsed["lifecycle_stats"][0]["network_hops"], 100)
         self.assertEqual(parsed["type_class_stats"][0]["tentative_drop"], 10)
+        self.assertEqual(len(parsed["credit_time_series"]), 2)
+        time_rows, lag_rows = analyze.build_credit_time_series(
+            parsed,
+            [
+                {
+                    "start_ms": 0.0,
+                    "finish_ms": 0.2,
+                    "completed": True,
+                }
+            ],
+            superslice_ns=55_000,
+        )
+        self.assertAlmostEqual(time_rows[0]["tentative_generated_share"], 0.4)
+        self.assertAlmostEqual(time_rows[0]["mean_regular_probability"], 0.6)
+        self.assertAlmostEqual(time_rows[0]["feedback_regular_loss_ratio"], 0.2)
+        self.assertEqual(time_rows[0]["regular_cohort_pending"], 10)
+        self.assertAlmostEqual(
+            time_rows[0]["regular_cohort_drop_ratio_resolved"], 0.4
+        )
+        self.assertAlmostEqual(time_rows[1]["mean_feedback_rate_delta"], -0.2)
+        self.assertEqual(time_rows[0]["active_flows_midpoint"], 1)
+        self.assertEqual(lag_rows[1]["lag_us"], 55.0)
+        self.assertEqual(set(time_rows[0]), set(analyze.CREDIT_TIME_SERIES_OUTPUT_FIELDS))
+        self.assertEqual(set(lag_rows[0]), set(analyze.CREDIT_TIME_SERIES_LAG_FIELDS))
         self.assertEqual(parsed["nic_slot_totals"]["regular"], 1)
         self.assertIn("regular,high", slot_rows)
         self.assertIn("high,1,1,0,2,4,admit", admission_rows)

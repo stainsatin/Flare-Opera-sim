@@ -97,6 +97,7 @@ public:
     p->_tentative = false;
     p->_prio = false;
     p->_credit_enqueue_seq = 0;
+    p->_generation_superslice = -1;
     p->_queueing = 0;
     return p;
   }
@@ -113,6 +114,10 @@ public:
   bool prio() {return _prio;}
   void set_credit_enqueue_seq(uint64_t sequence) {_credit_enqueue_seq = sequence;}
   uint64_t credit_enqueue_seq() const {return _credit_enqueue_seq;}
+  void set_generation_superslice(int64_t superslice) {
+    _generation_superslice = superslice;
+  }
+  int64_t generation_superslice() const {return _generation_superslice;}
   inline simtime_picosec ts() const {return _ts;}
   inline void set_ts(simtime_picosec ts) {_ts = ts;}
   XPassSrc *get_xpsrc() {return _xpsrc;}
@@ -130,6 +135,7 @@ protected:
   bool _tentative;
   bool _prio;
   uint64_t _credit_enqueue_seq;
+  int64_t _generation_superslice;
   static PacketDB<XPassPull> _packetdb;
 };
 
