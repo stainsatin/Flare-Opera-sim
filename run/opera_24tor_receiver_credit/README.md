@@ -1,5 +1,28 @@
 # Receiver-side Credit service experiments
 
+## Lightweight FIFO versus NEW comparison
+
+For the normal performance comparison, run only two cases with one seed:
+
+```bash
+bash run/opera_24tor_receiver_credit/compare.sh --build
+```
+
+This executes:
+
+- `fifo`: original FIFO behavior with audit instrumentation.
+- `new`: Regular-first, one Tentative probe per 16 Regular-backlogged slots,
+  and Regular-only dynamic Hop WRR 4:2:1.
+
+Both cases use the same 384-flow, 2 MiB workload and original feedback. The
+comparison deliberately leaves feedback grace and push-out disabled so the
+measured difference comes from receiver Credit service. Results are written
+to `results_fifo_vs_new/comparison_summary.csv` and
+`results_fifo_vs_new/per_seed_comparison.csv`. Use `--seeds 1,2,3` only when a
+small robustness check is needed; that runs six simulations.
+
+## Full mechanism matrix
+
 This experiment keeps Flare Credit generation, Opera routing, ToR shaping,
 Data queues, and the shared `credq=60` capacity unchanged. It separates four
 questions into opt-in modes:
