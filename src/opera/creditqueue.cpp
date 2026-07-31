@@ -87,6 +87,189 @@ static bool credit_time_series_enabled = false;
 static DynExpTopology* credit_time_series_topology = NULL;
 static map<int64_t, CreditTimeSeriesCounters> credit_time_series_counters;
 
+struct FeedbackWindowAudit {
+  DynExpTopology* top = NULL;
+  uint32_t host_id = 0;
+  uint32_t flow_id = 0;
+  uint64_t window_id = 0;
+  int slice = 0;
+  simtime_picosec closed_at = 0;
+  uint64_t rate_before = 0;
+  uint64_t rate_after = 0;
+  uint64_t max_rate = 0;
+  uint64_t regular_issued_control = 0;
+  uint64_t regular_returned_control = 0;
+  uint64_t tentative_issued_control = 0;
+  uint64_t tentative_returned_control = 0;
+  uint64_t feedback_sample_size = 0;
+  uint64_t feedback_reported_lost = 0;
+  uint64_t tentative_issued = 0;
+  uint64_t tentative_returned = 0;
+  uint64_t tentative_dropped = 0;
+  uint64_t regular_issued = 0;
+  uint64_t regular_returned_by_close = 0;
+  uint64_t regular_late = 0;
+  uint64_t regular_confirmed_dropped = 0;
+  double computed_loss = 0;
+  double target_loss = 0;
+  bool closed = false;
+};
+
+typedef pair<uint32_t, uint64_t> FeedbackWindowKey;
+static bool feedback_window_trace_enabled = false;
+static map<FeedbackWindowKey, FeedbackWindowAudit> feedback_window_audits;
+static map<pair<uint32_t, uint64_t>, FeedbackWindowKey>
+    feedback_regular_lookup;
+
+void configureFeedbackWindowTrace(bool enabled) {
+  feedback_window_trace_enabled = enabled;
+  feedback_window_audits.clear();
+  feedback_regular_lookup.clear();
+}
+
+static FeedbackWindowAudit& feedbackWindow(Packet& pkt) {
+  XPassPull& credit = (XPassPull&)pkt;
+  FeedbackWindowKey key(pkt.flow_id(), credit.feedback_window_id());
+  FeedbackWindowAudit& window = feedback_window_audits[key];
+  window.top = pkt.get_topology();
+  window.host_id = pkt.get_src();
+  window.flow_id = pkt.flow_id();
+  window.window_id = credit.feedback_window_id();
+  return window;
+}
+
+void recordFeedbackCreditIssue(Packet& pkt) {
+  if (!feedback_window_trace_enabled || pkt.type() != XPCREDIT) return;
+  XPassPull& credit = (XPassPull&)pkt;
+  FeedbackWindowAudit& window = feedbackWindow(pkt);
+  if (credit.tentative()) {
+    window.tentative_issued++;
+    return;
+  }
+  window.regular_issued++;
+  feedback_regular_lookup[make_pair(pkt.flow_id(), credit.pacerno())] =
+      FeedbackWindowKey(pkt.flow_id(), credit.feedback_window_id());
+}
+
+void recordFeedbackCreditDrop(Packet& pkt) {
+  if (!feedback_window_trace_enabled || pkt.type() != XPCREDIT) return;
+  XPassPull& credit = (XPassPull&)pkt;
+  if (credit.tentative()) {
+    feedbackWindow(pkt).tentative_dropped++;
+    return;
+  }
+  map<pair<uint32_t, uint64_t>, FeedbackWindowKey>::iterator lookup =
+      feedback_regular_lookup.find(make_pair(pkt.flow_id(), credit.pacerno()));
+  if (lookup == feedback_regular_lookup.end()) return;
+  feedback_window_audits[lookup->second].regular_confirmed_dropped++;
+  feedback_regular_lookup.erase(lookup);
+}
+
+void recordFeedbackDataReturn(uint32_t flow_id, uint64_t window_id,
+                              uint64_t pacer_no, bool tentative,
+                              simtime_picosec time) {
+  if (!feedback_window_trace_enabled || window_id == 0) return;
+  FeedbackWindowKey key(flow_id, window_id);
+  if (tentative) {
+    map<FeedbackWindowKey, FeedbackWindowAudit>::iterator it =
+        feedback_window_audits.find(key);
+    if (it != feedback_window_audits.end()) it->second.tentative_returned++;
+    return;
+  }
+  map<pair<uint32_t, uint64_t>, FeedbackWindowKey>::iterator lookup =
+      feedback_regular_lookup.find(make_pair(flow_id, pacer_no));
+  if (lookup == feedback_regular_lookup.end()) return;
+  FeedbackWindowAudit& window = feedback_window_audits[lookup->second];
+  if (window.closed && time > window.closed_at)
+    window.regular_late++;
+  else
+    window.regular_returned_by_close++;
+  feedback_regular_lookup.erase(lookup);
+}
+
+void recordDetailedFeedbackWindow(
+    DynExpTopology* top, simtime_picosec time, uint32_t host_id,
+    uint32_t flow_id, uint64_t window_id, uint64_t rate_before,
+    uint64_t rate_after, uint64_t max_rate, uint64_t regular_issued,
+    uint64_t regular_returned, uint64_t tentative_issued,
+    uint64_t tentative_returned, uint64_t feedback_sample_size,
+    uint64_t feedback_reported_lost, double computed_loss,
+    double target_loss) {
+  if (!feedback_window_trace_enabled) return;
+  FeedbackWindowKey key(flow_id, window_id);
+  FeedbackWindowAudit& window = feedback_window_audits[key];
+  window.top = top;
+  window.host_id = host_id;
+  window.flow_id = flow_id;
+  window.window_id = window_id;
+  window.slice = top->time_to_slice(time);
+  window.closed_at = time;
+  window.rate_before = rate_before;
+  window.rate_after = rate_after;
+  window.max_rate = max_rate;
+  window.regular_issued_control = regular_issued;
+  window.regular_returned_control = regular_returned;
+  window.tentative_issued_control = tentative_issued;
+  window.tentative_returned_control = tentative_returned;
+  window.feedback_sample_size = feedback_sample_size;
+  window.feedback_reported_lost = feedback_reported_lost;
+  window.computed_loss = computed_loss;
+  window.target_loss = target_loss;
+  window.closed = true;
+}
+
+void reportFeedbackWindowTrace() {
+  if (!feedback_window_trace_enabled) return;
+  cout << "# FeedbackWindowTrace time_ps host_id flow_id window_id slice "
+       << "crt_rate_before crt_rate_after max_rate regular_issued_in_window "
+       << "regular_returned_in_window regular_outstanding_at_window_end "
+       << "regular_eventually_delivered_from_window "
+       << "regular_permanently_dropped_from_window tentative_issued_in_window "
+       << "tentative_returned_in_window tentative_dropped_in_window "
+       << "computed_feedback_loss final_actual_regular_loss target_loss "
+       << "feedback_sample_size feedback_reported_lost_regular "
+       << "false_loss_count false_loss_ratio controller_regular_issued "
+       << "controller_regular_returned regular_unresolved_at_sim_end"
+       << endl;
+  for (map<FeedbackWindowKey, FeedbackWindowAudit>::const_iterator it =
+           feedback_window_audits.begin();
+       it != feedback_window_audits.end(); ++it) {
+    const FeedbackWindowAudit& window = it->second;
+    if (!window.closed) continue;
+    uint64_t returned_by_close = window.regular_returned_by_close;
+    uint64_t late = window.regular_late;
+    uint64_t issued = window.regular_issued;
+    uint64_t resolved = returned_by_close + late +
+                        window.regular_confirmed_dropped;
+    assert(resolved <= issued);
+    uint64_t unresolved_at_sim_end = issued - resolved;
+    uint64_t permanently_dropped = window.regular_confirmed_dropped +
+                                   unresolved_at_sim_end;
+    uint64_t outstanding = issued - returned_by_close;
+    uint64_t reported_lost = window.feedback_reported_lost;
+    uint64_t false_loss = min(late, reported_lost);
+    double final_loss = issued ? (double)permanently_dropped / issued : 0.0;
+    double false_ratio = reported_lost ? (double)false_loss / reported_lost : 0.0;
+    cout << "FeedbackWindowTrace " << window.closed_at << " "
+         << window.host_id << " " << window.flow_id << " "
+         << window.window_id << " " << window.slice << " "
+         << window.rate_before << " " << window.rate_after << " "
+         << window.max_rate << " " << issued << " "
+         << returned_by_close << " " << outstanding << " "
+         << late << " " << permanently_dropped << " "
+         << window.tentative_issued << " "
+         << window.tentative_returned << " "
+         << window.tentative_dropped << " " << setprecision(12)
+         << window.computed_loss << " " << final_loss << " "
+         << window.target_loss << " " << window.feedback_sample_size << " "
+         << reported_lost << " " << false_loss << " " << false_ratio
+         << " " << window.regular_issued_control << " "
+         << window.regular_returned_control
+         << " " << unresolved_at_sim_end
+         << endl;
+  }
+}
+
 static CreditTimeSeriesCounters* timeSeriesCounters(DynExpTopology* top,
                                                      simtime_picosec time) {
   if (!credit_time_series_enabled) return NULL;
@@ -173,6 +356,7 @@ static void recordCreditStage(Packet& pkt, CreditLifecycleStage stage) {
 
 static void recordCreditLifecycleDrop(Packet& pkt, bool endpoint,
                                       CreditDropReason reason) {
+  recordFeedbackCreditDrop(pkt);
   CreditLifecycleCounters& counters = lifecycleCounters(pkt);
   if (endpoint) {
     counters.endpoint_dropped++;
@@ -337,9 +521,16 @@ CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _next_prio = -1;
   _is_nic = false;
   _rx_hop_prio = false;
+  _rx_regular_first = false;
+  _rx_regular_hop_prio = false;
   _rx_global_tentative = false;
   _rx_credit_pushout = false;
+  _rx_regular_pushout_tentative = false;
   _rx_credit_slot_trace = false;
+  _tentative_probe_interval = 0;
+  _regular_backlogged_slots_since_probe = 0;
+  _selected_probe = false;
+  _selected_reason = "fifo_head";
   _priority_seed = 13;
   _host_id = -1;
   _last_priority_slice = -1;
@@ -355,6 +546,22 @@ CreditQueue::CreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _priority_pushouts.assign(CRED_Q_N, 0);
   _priority_queued_bytes.assign(CRED_Q_N, 0);
   _priority_max_queued.assign(CRED_Q_N, 0);
+  _slots_with_regular_pending = 0;
+  _regular_selected_while_regular_pending = 0;
+  _tentative_selected_while_regular_pending = 0;
+  _tentative_probe_slots = 0;
+  _used_nic_credit_slots = 0;
+  _total_nic_credit_opportunities = 0;
+  _selected_regular_pending = 0;
+  _selected_tentative_pending = 0;
+  _selected_regular_classes.assign(CRED_Q_N, 0);
+  _selected_regular_oldest_age = 0;
+  _selected_tentative_oldest_age = 0;
+  for (int prio = 0; prio < CRED_Q_N; prio++) {
+    _regular_wrr_fallbacks[prio] = 0;
+    _regular_wrr_scheduled[prio] = 0;
+    _regular_wrr_selected[prio] = 0;
+  }
   buildCreditSchedule();
 }
 
@@ -387,6 +594,8 @@ void CreditQueue::scheduleCredit() {
 void CreditQueue::updateAvailCredit() {
   simtime_picosec spacing = _ps_per_byte * _data_size;
   int new_cred = cred_tx_delta() / spacing;
+  if (_is_nic && new_cred > 0)
+    _total_nic_credit_opportunities += new_cred;
   _avail_cred += new_cred;
   _avail_cred = min(_avail_cred, _max_avail_cred);
   // cout << nodename() << " updateAvailCredit new_cred " << new_cred << " avail
@@ -395,18 +604,27 @@ void CreditQueue::updateAvailCredit() {
 }
 
 bool CreditQueue::receiverPriorityEnabled() const {
-  return _is_nic && _rx_hop_prio;
+  return _is_nic && (_rx_hop_prio || _rx_regular_hop_prio);
+}
+
+bool CreditQueue::receiverSchedulerEnabled() const {
+  return _is_nic &&
+         (_rx_regular_first || _rx_regular_hop_prio);
 }
 
 // Class is independent from the physical queue so admission-only mode can
 // retain one global FIFO while still accounting by hop class.
-inline int CreditQueue::creditClass(Packet &pkt) {
+inline int CreditQueue::creditClass(Packet &pkt) const {
   assert(pkt.type() == XPCREDIT);
   return rawCreditClass(pkt);
 }
 
 inline int CreditQueue::creditQueueIndex(Packet &pkt) {
-  return (_is_nic && _rx_hop_prio) ? creditClass(pkt) : CRED_Q_N - 1;
+  if (_is_nic && _rx_hop_prio) return creditClass(pkt);
+  if (_is_nic && _rx_regular_hop_prio &&
+      !((XPassPull*)&pkt)->tentative())
+    return creditClass(pkt);
+  return CRED_Q_N - 1;
 }
 
 inline int CreditQueue::creditType(Packet &pkt) const {
@@ -472,9 +690,13 @@ void CreditQueue::installPriorityRoute(Packet &pkt, int slice) {
 }
 
 void CreditQueue::refreshPriorityClassification() {
-  if (!_is_nic || !_rx_hop_prio) return;
+  if (!_is_nic || (!_rx_hop_prio && !_rx_regular_hop_prio)) return;
   int slice = _top->time_to_slice(eventlist().now());
   if (slice == _last_priority_slice) return;
+  // A Credit whose serialization has started is immutable. Defer the slice
+  // rebuild until its completion; beginService() will refresh before choosing
+  // the next pending Credit.
+  if (_tx_next == CRED && _credit_in_service != NULL) return;
 
   vector<Packet*> pending;
   for (int queue_index = 0; queue_index < CRED_Q_N; queue_index++) {
@@ -496,21 +718,192 @@ void CreditQueue::refreshPriorityClassification() {
   for (vector<Packet*>::iterator it = pending.begin(); it != pending.end();
        ++it) {
     Packet* pkt = *it;
-    installPriorityRoute(*pkt, slice);
+    bool tentative = ((XPassPull*)pkt)->tentative();
+    if (_rx_hop_prio || !tentative) installPriorityRoute(*pkt, slice);
     int credit_class = creditClass(*pkt);
-    _enqueued_cred[credit_class].push_front(pkt);
-    accountCreditEnqueue(*pkt, credit_class, credit_class);
+    int queue_index =
+        (_rx_regular_hop_prio && tentative) ? CRED_Q_N - 1 : credit_class;
+    _enqueued_cred[queue_index].push_front(pkt);
+    accountCreditEnqueue(*pkt, queue_index, credit_class);
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] += 1;
   }
   _last_priority_slice = slice;
 }
 
-// check for next possible credit to send and drops credits that timed out
-// returns priority of next available credit queue to send out from
-// returns -1 if no credit to send out
-inline int CreditQueue::next_cred() {
+Packet* CreditQueue::oldestCreditOfType(bool tentative,
+                                        int* queue_index) const {
+  Packet* selected = NULL;
+  uint64_t selected_sequence = 0;
+  *queue_index = -1;
+  for (int i = 0; i < CRED_Q_N; i++) {
+    for (list<Packet*>::const_iterator it = _enqueued_cred[i].begin();
+         it != _enqueued_cred[i].end(); ++it) {
+      Packet* candidate = *it;
+      if (((XPassPull*)candidate)->tentative() != tentative) continue;
+      uint64_t sequence = ((XPassPull*)candidate)->credit_enqueue_seq();
+      if (selected == NULL || sequence < selected_sequence) {
+        selected = candidate;
+        selected_sequence = sequence;
+        *queue_index = i;
+      }
+    }
+  }
+  return selected;
+}
+
+Packet* CreditQueue::oldestRegularInClass(int credit_class,
+                                           int* queue_index) const {
+  Packet* selected = NULL;
+  uint64_t selected_sequence = 0;
+  *queue_index = -1;
+  for (int i = 0; i < CRED_Q_N; i++) {
+    for (list<Packet*>::const_iterator it = _enqueued_cred[i].begin();
+         it != _enqueued_cred[i].end(); ++it) {
+      Packet* candidate = *it;
+      if (((XPassPull*)candidate)->tentative() ||
+          creditClass(*candidate) != credit_class)
+        continue;
+      uint64_t sequence = ((XPassPull*)candidate)->credit_enqueue_seq();
+      if (selected == NULL || sequence < selected_sequence) {
+        selected = candidate;
+        selected_sequence = sequence;
+        *queue_index = i;
+      }
+    }
+  }
+  return selected;
+}
+
+void CreditQueue::moveCreditToHeadOfService(Packet* pkt, int queue_index) {
+  assert(pkt != NULL && queue_index >= 0 && queue_index < CRED_Q_N);
+  list<Packet*>& queue = _enqueued_cred[queue_index];
+  for (list<Packet*>::iterator it = queue.begin(); it != queue.end(); ++it) {
+    if (*it == pkt) {
+      queue.splice(queue.end(), queue, it);
+      return;
+    }
+  }
+  assert(false);
+}
+
+void CreditQueue::pendingCreditCounts(
+    uint64_t* regular, uint64_t* tentative,
+    vector<mem_b>* regular_classes) const {
+  *regular = 0;
+  *tentative = 0;
+  regular_classes->assign(CRED_Q_N, 0);
+  for (int i = 0; i < CRED_Q_N; i++) {
+    for (list<Packet*>::const_iterator it = _enqueued_cred[i].begin();
+         it != _enqueued_cred[i].end(); ++it) {
+      Packet* pkt = *it;
+      if (((XPassPull*)pkt)->tentative()) {
+        (*tentative)++;
+      } else {
+        (*regular)++;
+        (*regular_classes)[creditClass(*pkt)]++;
+      }
+    }
+  }
+}
+
+uint64_t CreditQueue::oldestCreditAge(bool tentative) const {
+  int queue_index = -1;
+  Packet* pkt = oldestCreditOfType(tentative, &queue_index);
+  if (pkt == NULL) return 0;
+  simtime_picosec enqueued = ((XPassPull*)pkt)->credit_enqueue_time();
+  return eventlist().now() >= enqueued ? eventlist().now() - enqueued : 0;
+}
+
+int CreditQueue::selectTentativeCredit() {
+  int queue_index = -1;
+  Packet* pkt = oldestCreditOfType(true, &queue_index);
+  if (pkt == NULL) return -1;
+  moveCreditToHeadOfService(pkt, queue_index);
+  return queue_index;
+}
+
+int CreditQueue::selectRegularCredit(bool commit_selection) {
+  if (!_rx_regular_hop_prio) {
+    int queue_index = -1;
+    Packet* pkt = oldestCreditOfType(false, &queue_index);
+    if (pkt == NULL) return -1;
+    moveCreditToHeadOfService(pkt, queue_index);
+    _selected_schedule_position = -1;
+    _selected_schedule_target = -1;
+    _selected_fallback = false;
+    _selected_reason = "regular_first";
+    return queue_index;
+  }
+
+  assert(!_wrr_schedule.empty());
+  _selected_schedule_position = _wrr_schedule_position;
+  _selected_schedule_target = _wrr_schedule[_wrr_schedule_position];
+  _selected_fallback = false;
+  if (commit_selection)
+    _regular_wrr_scheduled[_selected_schedule_target]++;
+
+  int queue_index = -1;
+  Packet* pkt = oldestRegularInClass(_selected_schedule_target, &queue_index);
+  if (pkt == NULL) {
+    for (uint32_t offset = 1; offset < _wrr_schedule.size(); offset++) {
+      int position = (_wrr_schedule_position + offset) % _wrr_schedule.size();
+      int prio = _wrr_schedule[position];
+      pkt = oldestRegularInClass(prio, &queue_index);
+      if (pkt != NULL) {
+        _selected_fallback = true;
+        break;
+      }
+    }
+  }
+  if (pkt == NULL) return -1;
+  int selected_class = creditClass(*pkt);
+  if (commit_selection) {
+    _regular_wrr_selected[selected_class]++;
+    if (_selected_fallback)
+      _regular_wrr_fallbacks[_selected_schedule_target]++;
+  }
+  moveCreditToHeadOfService(pkt, queue_index);
+  if (_selected_fallback)
+    _selected_reason = "fallback";
+  else if (selected_class == 0)
+    _selected_reason = "regular_wrr_high";
+  else if (selected_class == 1)
+    _selected_reason = "regular_wrr_medium";
+  else
+    _selected_reason = "regular_wrr_low";
+  return queue_index;
+}
+
+// Check for the next possible Credit and remove expired queue heads. Selection
+// is committed only at the actual NIC transmit event so probe/WRR counters
+// advance once per used Credit slot.
+inline int CreditQueue::next_cred(bool commit_selection) {
   refreshPriorityClassification();
-  for (int i = 0; i < _queuesize_cred.size(); i++) {
+  if (receiverSchedulerEnabled()) {
+    for (int i = 0; i < CRED_Q_N; i++) {
+      list<Packet*>& queue = _enqueued_cred[i];
+      for (list<Packet*>::iterator it = queue.begin(); it != queue.end();) {
+        Packet* p = *it;
+        bool in_service = _tx_next == CRED && p == _credit_in_service;
+        if (in_service ||
+            eventlist().now() + drainTime(p) <= p->get_tmp_ts()) {
+          ++it;
+          continue;
+        }
+        it = queue.erase(it);
+        int credit_class = creditClass(*p);
+        accountCreditDequeue(*p, i, credit_class);
+        _hops_to_creds[max((p->get_maxhops() - p->get_crthop()), 1)] -= 1;
+        _drop_creds++;
+        _drop_timeout++;
+        notePriorityDrop(credit_class, false);
+        noteTypeClassDrop(*p, credit_class, CREDIT_DROP_TIMEOUT);
+        recordCreditLifecycleDrop(*p, _is_nic, CREDIT_DROP_TIMEOUT);
+        recordFlowCreditDrop(*p, &FlowCreditCounters::timeout, _is_nic);
+        p->free();
+      }
+    }
+  } else for (int i = 0; i < _queuesize_cred.size(); i++) {
     if (_queuesize_cred[i] > 0) {
       assert(_enqueued_cred[i].size() > 0);
       // look for not expired packet
@@ -539,22 +932,65 @@ inline int CreditQueue::next_cred() {
     _selected_schedule_position = _wrr_schedule_position;
     _selected_schedule_target = _wrr_schedule[_wrr_schedule_position];
     _selected_fallback = false;
-    if (!_enqueued_cred[_selected_schedule_target].empty())
+    if (!_enqueued_cred[_selected_schedule_target].empty()) {
+      _selected_reason = _selected_schedule_target == 0 ? "regular_wrr_high" :
+                         _selected_schedule_target == 1 ? "regular_wrr_medium" :
+                                                         "regular_wrr_low";
       return _selected_schedule_target;
+    }
     for (uint32_t offset = 1; offset < _wrr_schedule.size(); offset++) {
       int position = (_wrr_schedule_position + offset) % _wrr_schedule.size();
       int prio = _wrr_schedule[position];
       if (!_enqueued_cred[prio].empty()) {
         _selected_fallback = true;
+        _selected_reason = "fallback";
         return prio;
       }
     }
     return -1;
   }
 
+  if (receiverSchedulerEnabled()) {
+    uint64_t regular_pending = 0;
+    uint64_t tentative_pending = 0;
+    vector<mem_b> regular_classes;
+    pendingCreditCounts(&regular_pending, &tentative_pending,
+                        &regular_classes);
+    if (regular_pending > 0) {
+      bool probe_due = false;
+      if (_tentative_probe_interval > 0) {
+        uint32_t next_count = _regular_backlogged_slots_since_probe + 1;
+        probe_due = next_count >= _tentative_probe_interval &&
+                    tentative_pending > 0;
+        if (commit_selection) {
+          if (next_count >= _tentative_probe_interval)
+            _regular_backlogged_slots_since_probe = 0;
+          else
+            _regular_backlogged_slots_since_probe = next_count;
+        }
+      }
+      if (probe_due) {
+        int queue_index = selectTentativeCredit();
+        assert(queue_index >= 0);
+        _selected_probe = true;
+        _selected_reason = "tentative_probe";
+        return queue_index;
+      }
+      _selected_probe = false;
+      return selectRegularCredit(commit_selection);
+    }
+    if (commit_selection) _regular_backlogged_slots_since_probe = 0;
+    _selected_probe = false;
+    int queue_index = selectTentativeCredit();
+    if (queue_index >= 0) _selected_reason = "fallback";
+    return queue_index;
+  }
+
   _selected_schedule_position = -1;
   _selected_schedule_target = -1;
   _selected_fallback = false;
+  _selected_probe = false;
+  _selected_reason = "fifo_head";
   for (int i = 0; i < CRED_Q_N; i++) {
     if (!_enqueued_cred[i].empty()) return i;
   }
@@ -562,7 +998,7 @@ inline int CreditQueue::next_cred() {
 }
 
 void CreditQueue::advanceCreditPriority(int served_prio) {
-  if (!_is_nic || !_rx_hop_prio) return;
+  if (!_is_nic || (!_rx_hop_prio && !_rx_regular_hop_prio)) return;
   assert(served_prio >= 0 && served_prio < CRED_Q_N);
   _wrr_schedule_position =
       (_wrr_schedule_position + 1) % _wrr_schedule.size();
@@ -669,9 +1105,40 @@ bool CreditQueue::evictCreditVictim(int victim_class, bool tentative) {
   return false;
 }
 
+bool CreditQueue::evictOldestTentativeCredit() {
+  Packet* victim = NULL;
+  int victim_queue = -1;
+  uint64_t victim_sequence = 0;
+  for (int queue_index = 0; queue_index < CRED_Q_N; queue_index++) {
+    list<Packet*>& queue = _enqueued_cred[queue_index];
+    for (list<Packet*>::iterator it = queue.begin(); it != queue.end(); ++it) {
+      Packet* candidate = *it;
+      bool in_service = _tx_next == CRED && candidate == _credit_in_service;
+      if (in_service || !((XPassPull*)candidate)->tentative()) continue;
+      uint64_t sequence = ((XPassPull*)candidate)->credit_enqueue_seq();
+      if (victim == NULL || sequence < victim_sequence) {
+        victim = candidate;
+        victim_queue = queue_index;
+        victim_sequence = sequence;
+      }
+    }
+  }
+  if (victim == NULL) return false;
+  list<Packet*>& queue = _enqueued_cred[victim_queue];
+  queue.remove(victim);
+  dropQueuedCredit(victim, victim_queue, creditClass(*victim), true);
+  return true;
+}
+
 bool CreditQueue::evictPriorityCredit(Packet &arriving, int arriving_class) {
-  assert(_is_nic && _rx_credit_pushout);
+  assert(_is_nic &&
+         (_rx_credit_pushout || _rx_regular_pushout_tentative));
   bool arriving_tentative = ((XPassPull*)&arriving)->tentative();
+
+  if (_rx_regular_pushout_tentative) {
+    if (arriving_tentative) return false;
+    return evictOldestTentativeCredit();
+  }
 
   if (arriving_tentative) {
     for (int victim_class = CRED_Q_N - 1;
@@ -836,7 +1303,10 @@ void CreditQueue::receivePacket(Packet &pkt) {
     mem_b total_occupancy_before = queuesize_cred();
     _tot_creds++;
     _type_class_stats[creditType(pkt)][credit_class].arrived++;
-    if (_is_nic && _rx_hop_prio) _priority_arrivals[credit_class]++;
+    if (_is_nic && (_rx_hop_prio ||
+                    (_rx_regular_hop_prio &&
+                     !((XPassPull*)&pkt)->tentative())))
+      _priority_arrivals[credit_class]++;
     FlowCreditCounters& counters = flowCreditCounters(pkt);
     counters.queue_arrivals++;
     if (_is_nic) {
@@ -850,9 +1320,12 @@ void CreditQueue::receivePacket(Packet &pkt) {
       recordCreditStage(pkt, CREDIT_GENERATED);
       ((XPassPull*)&pkt)->set_credit_enqueue_seq(
           _credit_enqueue_sequence++);
+      ((XPassPull*)&pkt)->set_credit_enqueue_time(eventlist().now());
     }
     // cout << "xpcredit\n";
-    bool priority_pushout = _is_nic && _rx_credit_pushout;
+    bool priority_pushout =
+        _is_nic &&
+        (_rx_credit_pushout || _rx_regular_pushout_tentative);
     if (!priority_pushout &&
         queuesize_cred() + pkt.size() > _maxsize_cred) {
       // if the credit doesn't fit in the queue, drop it
@@ -957,6 +1430,9 @@ void CreditQueue::beginService() {
   int prio = next_cred();
   // if credit clock is ready and credits are enqueued, send credit
   if (credit_ready() && prio >= 0) {
+    if (_is_nic && (_rx_hop_prio || receiverSchedulerEnabled()))
+      prio = next_cred(true);
+    assert(prio >= 0);
     _cred_tx_pending = false;
     eventlist().sourceIsPendingRel(*this,
                                    drainTime(_enqueued_cred[prio].back()));
@@ -964,6 +1440,13 @@ void CreditQueue::beginService() {
     _tx_next = CRED;
     _next_prio = prio;
     _credit_in_service = _enqueued_cred[prio].back();
+    if (_is_nic && _rx_credit_slot_trace) {
+      pendingCreditCounts(&_selected_regular_pending,
+                          &_selected_tentative_pending,
+                          &_selected_regular_classes);
+      _selected_regular_oldest_age = oldestCreditAge(false);
+      _selected_tentative_oldest_age = oldestCreditAge(true);
+    }
   } else if (!_enqueued.empty()) {
     eventlist().sourceIsPendingRel(*this, drainTime(_enqueued.back()));
     _next_sched_tx = eventlist().now() + drainTime(_enqueued.back());
@@ -1258,6 +1741,10 @@ NICCreditQueue::NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize,
                                bool rx_global_tentative,
                                bool rx_credit_pushout,
                                bool rx_credit_slot_trace,
+                               bool rx_regular_first,
+                               uint32_t tentative_probe_interval,
+                               bool rx_regular_hop_prio,
+                               bool rx_regular_pushout_tentative,
                                uint64_t priority_seed,
                                uint32_t high_weight,
                                uint32_t medium_weight,
@@ -1271,25 +1758,61 @@ NICCreditQueue::NICCreditQueue(linkspeed_bps bitrate, mem_b maxsize,
   _rx_global_tentative = rx_global_tentative;
   _rx_credit_pushout = rx_credit_pushout;
   _rx_credit_slot_trace = rx_credit_slot_trace;
+  _rx_regular_first = rx_regular_first;
+  _tentative_probe_interval = tentative_probe_interval;
+  _rx_regular_hop_prio = rx_regular_hop_prio;
+  _rx_regular_pushout_tentative = rx_regular_pushout_tentative;
+  _total_nic_credit_opportunities = 1;
   _priority_seed = priority_seed;
   _credit_weights = {high_weight, medium_weight, low_weight};
   buildCreditSchedule();
 }
 
+void CreditQueue::reportNICSlotStats() {
+  if (!_is_nic || !_rx_credit_slot_trace) return;
+  updateAvailCredit();
+  uint64_t idle = _total_nic_credit_opportunities > _used_nic_credit_slots
+                      ? _total_nic_credit_opportunities -
+                            _used_nic_credit_slots
+                      : 0;
+  cout << "NICCreditSlotStats " << _host_id << " "
+       << _total_nic_credit_opportunities << " " << _used_nic_credit_slots
+       << " " << idle << " " << _slots_with_regular_pending << " "
+       << _regular_selected_while_regular_pending << " "
+       << _tentative_selected_while_regular_pending << " "
+       << _tentative_probe_slots << endl;
+}
+
+void CreditQueue::reportRegularWRRStats() {
+  if (!_is_nic || !_rx_regular_hop_prio) return;
+  cout << "RegularWRRStats " << _host_id;
+  for (int prio = 0; prio < CRED_Q_N; prio++)
+    cout << " " << _credit_weights[prio];
+  for (int prio = 0; prio < CRED_Q_N; prio++)
+    cout << " " << _regular_wrr_scheduled[prio];
+  for (int prio = 0; prio < CRED_Q_N; prio++)
+    cout << " " << _regular_wrr_selected[prio];
+  for (int prio = 0; prio < CRED_Q_N; prio++)
+    cout << " " << _regular_wrr_fallbacks[prio];
+  cout << endl;
+}
+
 void CreditQueue::reportNICCreditSlot(
     Packet &pkt, int credit_class, const vector<mem_b>& class_lengths,
-    uint64_t regular_pending, uint64_t tentative_pending) const {
+    uint64_t regular_pending, uint64_t tentative_pending,
+    uint64_t regular_oldest_age, uint64_t tentative_oldest_age) const {
   if (!_is_nic || !_rx_credit_slot_trace) return;
   static const char* type_names[2] = {"regular", "tentative"};
   static const char* class_names[CRED_Q_N] = {"high", "medium", "low"};
   cout << "NICCreditSlot " << eventlist().now() << " " << _host_id << " "
-       << _top->time_to_slice(eventlist().now()) << " "
+       << _top->time_to_slice(eventlist().now()) << " " << regular_pending
+       << " " << tentative_pending << " " << class_lengths[0] << " "
+       << class_lengths[1] << " " << class_lengths[2] << " "
        << type_names[rawCreditType(pkt)] << " " << class_names[credit_class]
        << " " << pkt.flow_id() << " " << max(pkt.get_maxhops(), 0) << " "
-       << class_lengths[0] << " " << class_lengths[1] << " "
-       << class_lengths[2] << " "
-       << class_lengths[0] + class_lengths[1] + class_lengths[2] << " "
-       << regular_pending << " " << tentative_pending << " "
+       << regular_pending + tentative_pending << " " << regular_pending
+       << " " << tentative_pending << " " << regular_oldest_age << " "
+       << tentative_oldest_age << " " << _selected_reason << " "
        << _selected_schedule_position << " "
        << (_selected_fallback ? 1 : 0) << '\n';
 }
@@ -1298,34 +1821,48 @@ void NICCreditQueue::completeService() {
   // cout << nodename() << " completeService " << eventlist().now() << endl;
   /* dequeue the packet */
   Packet *pkt = NULL;
-  vector<mem_b> selected_class_lengths(CRED_Q_N, 0);
-  uint64_t selected_regular_pending = 0;
-  uint64_t selected_tentative_pending = 0;
+  vector<mem_b> selected_class_lengths = _selected_regular_classes;
+  uint64_t selected_regular_pending = _selected_regular_pending;
+  uint64_t selected_tentative_pending = _selected_tentative_pending;
+  uint64_t selected_regular_oldest_age = _selected_regular_oldest_age;
+  uint64_t selected_tentative_oldest_age =
+      _selected_tentative_oldest_age;
   if (_tx_next == CRED) {
     int prio = _next_prio;
-    if (_rx_hop_prio) {
-      prio = next_cred();
-    }
     assert(_next_prio >= 0 && _next_prio < CRED_Q_N);
     assert(prio >= 0 && prio < CRED_Q_N);
     // cout << "creditq completeService\n";
     assert(queuesize_cred(prio) > 0);
     pkt = _enqueued_cred[prio].back();
-    for (int credit_prio = 0; credit_prio < CRED_Q_N; credit_prio++)
-      selected_class_lengths[credit_prio] =
-          _priority_queued_bytes[credit_prio] / pkt->size();
-    for (int credit_prio = 0; credit_prio < CRED_Q_N; credit_prio++) {
-      selected_regular_pending +=
-          _type_class_stats[0][credit_prio].queued_bytes / pkt->size();
-      selected_tentative_pending +=
-          _type_class_stats[1][credit_prio].queued_bytes / pkt->size();
+    assert(pkt == _credit_in_service);
+    if (_rx_credit_slot_trace && _rx_regular_hop_prio &&
+        !((XPassPull*)pkt)->tentative()) {
+      cout << "RegularWRRTrace " << eventlist().now() << " " << _host_id
+           << " " << _top->time_to_slice(eventlist().now()) << " "
+           << _selected_schedule_target << " " << creditClass(*pkt) << " "
+           << (selected_class_lengths[0] > 0 ? 1 : 0) << " "
+           << (selected_class_lengths[1] > 0 ? 1 : 0) << " "
+           << (selected_class_lengths[2] > 0 ? 1 : 0) << " "
+           << (_selected_fallback ? 1 : 0) << " "
+           << _selected_schedule_position << endl;
     }
     _enqueued_cred[prio].pop_back();
     updatePktOut(pkt->flow_id());
     int credit_class = creditClass(*pkt);
     accountCreditDequeue(*pkt, prio, credit_class);
     _tx_creds++;
-    advanceCreditPriority(prio);
+    _used_nic_credit_slots++;
+    if (selected_regular_pending > 0) {
+      _slots_with_regular_pending++;
+      if (((XPassPull*)pkt)->tentative())
+        _tentative_selected_while_regular_pending++;
+      else
+        _regular_selected_while_regular_pending++;
+    }
+    if (_selected_probe) _tentative_probe_slots++;
+    if (_rx_hop_prio ||
+        (_rx_regular_hop_prio && !((XPassPull*)pkt)->tentative()))
+      advanceCreditPriority(prio);
     flowCreditCounters(*pkt).queue_transmissions++;
     _hops_to_creds[max((pkt->get_maxhops() - pkt->get_crthop()), 1)] -= 1;
     _last_cred_tx_t = eventlist().now();
@@ -1384,7 +1921,9 @@ void NICCreditQueue::completeService() {
     int path_index;
     // A prioritized Credit carries the arrival-time route used to classify
     // it. Reuse that route only if NIC waiting did not cross a slice.
-    if (_is_nic && _rx_hop_prio && pkt->type() == XPCREDIT &&
+    if (_is_nic && pkt->type() == XPCREDIT &&
+        (_rx_hop_prio ||
+         (_rx_regular_hop_prio && !((XPassPull*)pkt)->tentative())) &&
         pkt->get_slice_sent() == slice) {
       path_index = pkt->get_path_index();
       assert(path_index >= 0 && path_index < npaths);
@@ -1418,11 +1957,14 @@ void NICCreditQueue::completeService() {
   if (pkt->type() == XPCREDIT) {
     int sent_credit_class = creditClass(*pkt);
     _type_class_stats[creditType(*pkt)][sent_credit_class].transmitted++;
-    if (_rx_hop_prio)
+    if (_rx_hop_prio ||
+        (_rx_regular_hop_prio && !((XPassPull*)pkt)->tentative()))
       _priority_transmissions[sent_credit_class]++;
     reportNICCreditSlot(*pkt, sent_credit_class, selected_class_lengths,
                         selected_regular_pending,
-                        selected_tentative_pending);
+                        selected_tentative_pending,
+                        selected_regular_oldest_age,
+                        selected_tentative_oldest_age);
     recordCreditStage(*pkt, CREDIT_SENT);
     recordFlowCreditAdmission(*pkt);
   }

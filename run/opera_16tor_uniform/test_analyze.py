@@ -21,7 +21,11 @@ CreditHopStats 2 tentative 40 35 20 5 15 40 0
 CreditPriorityStats host 4 -1 high 4 40 35 0 12 5 0
 CreditPriorityStats host 4 -1 medium 2 35 25 0 15 10 2
 CreditPriorityStats host 4 -1 low 1 25 10 0 20 15 3
-NICCreditSlot 1000 4 3 regular high 0 1 2 1 0 3 2 1 0 0
+NICCreditSlot 1000 4 3 2 1 1 1 0 regular high 0 1 3 2 1 100 200 regular_first -1 0
+NICCreditSlotStats 4 10 1 9 1 1 0 0
+FeedbackWindowTrace 1000 4 0 1 3 50 40 100 10 7 3 1 2 20 2 18 0.3 0.2 0.05 10 3 1 0.333333333333
+RegularWRRTrace 1000 4 3 0 0 1 1 0 0 0
+RegularWRRStats 4 4 2 1 10 5 2 9 4 1 1 1 1
 TentativeAdmission 900 4 0 3 1 high 1 1 0 2 4 admit
 CreditTypeClassStats tor 1 4 tentative high 40 25 0 12 15 10 2 3 0 0
 CreditLifecycleStats regular high 60 58 55 50 2 5 0 1 1 0 0 0 2 1 1 1 100
@@ -36,6 +40,9 @@ TopologyWrongDstStats 0 1 0 0
             path.write_text(log, encoding="ascii")
             parsed = analyze.parse_log(path)
             slot_rows = (Path(directory) / "per_nic_credit_slot.csv").read_text()
+            feedback_rows = (
+                Path(directory) / "feedback_window_trace.csv"
+            ).read_text()
             admission_rows = (Path(directory) / "tentative_admission.csv").read_text()
 
         self.assertEqual(parsed["flow_credits"][0]["topology"], 5)
@@ -83,7 +90,14 @@ TopologyWrongDstStats 0 1 0 0
         self.assertEqual(set(time_rows[0]), set(analyze.CREDIT_TIME_SERIES_OUTPUT_FIELDS))
         self.assertEqual(set(lag_rows[0]), set(analyze.CREDIT_TIME_SERIES_LAG_FIELDS))
         self.assertEqual(parsed["nic_slot_totals"]["regular"], 1)
+        self.assertEqual(parsed["nic_slot_totals"]["total_opportunities"], 10)
+        self.assertEqual(parsed["feedback_windows"][0]["false_loss_count"], 1)
+        self.assertEqual(
+            parsed["feedback_windows"][0]["controller_regular_issued"], 10
+        )
+        self.assertEqual(parsed["regular_wrr_stats"]["selected_high"], 9)
         self.assertIn("regular,high", slot_rows)
+        self.assertIn("0.333333333333", feedback_rows)
         self.assertIn("high,1,1,0,2,4,admit", admission_rows)
 
     def test_queue_roles_use_four_downlinks(self):
@@ -253,6 +267,12 @@ TopologyWrongDstStats 0 1 0 0
         self.assertAlmostEqual(summary["tentative_nic_slot_share"], 0.24)
         self.assertAlmostEqual(summary["nic_slot_fallback_ratio"], 0.05)
         self.assertAlmostEqual(summary["credit_drop_ratio"], 0.2)
+        self.assertEqual(summary["mean_fct"], summary["mean_fct_ms"])
+        self.assertEqual(
+            summary["active_throughput"],
+            summary["active_makespan_throughput_gbps"],
+        )
+        self.assertEqual(summary["data_drop"], summary["known_data_drops"])
         self.assertEqual(len(tor_rows), 16)
         self.assertTrue(all(row["outgoing_flows"] == 4 for row in tor_rows))
         self.assertTrue(all(row["incoming_flows"] == 4 for row in tor_rows))

@@ -218,6 +218,10 @@ Queue* DynExpTopology::alloc_src_queue(DynExpTopology* top, QueueLogger* queueLo
     bool rx_global_tentative = false;
     bool rx_credit_pushout = false;
     bool rx_credit_slot_trace = false;
+    bool rx_regular_first = false;
+    bool rx_regular_hop_prio = false;
+    bool rx_regular_pushout_tentative = false;
+    uint32_t tentative_probe_interval = 0;
     uint64_t priority_seed = 13;
     uint32_t high_weight = 4;
     uint32_t medium_weight = 2;
@@ -231,6 +235,15 @@ Queue* DynExpTopology::alloc_src_queue(DynExpTopology* top, QueueLogger* queueLo
         rx_credit_pushout = _params["rx_credit_pushout"] != 0;
     if (_params.count("rx_credit_slot_trace"))
         rx_credit_slot_trace = _params["rx_credit_slot_trace"] != 0;
+    if (_params.count("rx_regular_first"))
+        rx_regular_first = _params["rx_regular_first"] != 0;
+    if (_params.count("rx_regular_hop_prio"))
+        rx_regular_hop_prio = _params["rx_regular_hop_prio"] != 0;
+    if (_params.count("rx_regular_pushout_tentative"))
+        rx_regular_pushout_tentative =
+            _params["rx_regular_pushout_tentative"] != 0;
+    if (_params.count("tentative_probe_interval"))
+        tentative_probe_interval = _params["tentative_probe_interval"];
     if (_params.count("priority_seed"))
         priority_seed = _params["priority_seed"];
     if (_params.count("rx_hop_weight_high"))
@@ -242,7 +255,8 @@ Queue* DynExpTopology::alloc_src_queue(DynExpTopology* top, QueueLogger* queueLo
     return new NICCreditQueue(speedFromMbps((uint64_t)HOST_NIC), memFromPkt(FEEDER_BUFFER), *eventlist, queueLogger, this, _params["cq_size"], _params["sh_thresh"], 
     _params["ae_thresh"], _params["te_thresh"], node,
     rx_hop_prio, rx_global_tentative, rx_credit_pushout,
-    rx_credit_slot_trace, priority_seed,
+    rx_credit_slot_trace, rx_regular_first, tentative_probe_interval,
+    rx_regular_hop_prio, rx_regular_pushout_tentative, priority_seed,
     high_weight, medium_weight, low_weight);
   }
   if(qt==HBH) {

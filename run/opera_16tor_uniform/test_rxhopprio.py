@@ -13,6 +13,7 @@ MAIN_CPP = ROOT / "src/opera/datacenter/main_xpass_dynexpTopology.cpp"
 TOPOLOGY_CPP = ROOT / "src/opera/datacenter/dynexp_topology.cpp"
 ANALYZER = ROOT / "run/opera_16tor_uniform/analyze.py"
 RCDCP_RUN = ROOT / "run/opera_24tor_4flow_2MiB/run.sh"
+RECEIVER_RUN = ROOT / "run/opera_24tor_receiver_credit/run.sh"
 
 
 def function_body(source, signature):
@@ -40,6 +41,7 @@ class RcdcpContractTest(unittest.TestCase):
         cls.topology_cpp = TOPOLOGY_CPP.read_text(encoding="ascii")
         cls.analyzer = ANALYZER.read_text(encoding="ascii")
         cls.run_script = RCDCP_RUN.read_text(encoding="ascii")
+        cls.receiver_run = RECEIVER_RUN.read_text(encoding="ascii")
 
     def test_modes_are_opt_in_and_pushout_is_independent(self):
         for declaration in (
@@ -101,20 +103,25 @@ class RcdcpContractTest(unittest.TestCase):
             "slice == _last_priority_slice",
             "credit_enqueue_seq()",
             "installPriorityRoute(*pkt, slice)",
-            "_enqueued_cred[credit_class].push_front(pkt)",
+            "_enqueued_cred[queue_index].push_front(pkt)",
         ):
             self.assertIn(fragment, refresh)
         select = function_body(self.queue_cpp, "inline int CreditQueue::next_cred")
         self.assertIn("refreshPriorityClassification()", select)
+        self.assertIn(
+            "_tx_next == CRED && _credit_in_service != NULL", refresh
+        )
 
     def test_classification_route_is_reused_and_rng_isolated(self):
         complete = function_body(
             self.queue_cpp, "void NICCreditQueue::completeService"
         )
+        begin = function_body(self.queue_cpp, "void CreditQueue::beginService")
         route_hash = function_body(
             self.queue_cpp, "int CreditQueue::independentPathIndex"
         )
-        self.assertIn("prio = next_cred()", complete)
+        self.assertIn("prio = next_cred(true)", begin)
+        self.assertIn("assert(pkt == _credit_in_service)", complete)
         self.assertNotIn("fast_rand", route_hash)
         self.assertIn("if (npaths == 1) return 0", route_hash)
         self.assertIn("npaths == 1 ? 0 : fast_rand() % npaths", self.xpass_cpp)
@@ -167,6 +174,60 @@ class RcdcpContractTest(unittest.TestCase):
         self.assertIn("-rxhopweights 8 2 1", self.run_script)
         self.assertIn("-rxcreditslottrace", self.run_script)
         self.assertIn("summarize_seeds.py", self.run_script)
+
+    def test_receiver_service_modes_are_independent_and_opt_in(self):
+        for declaration in (
+            "bool rx_regular_first = false;",
+            "bool rx_regular_hop_prio = false;",
+            "bool rx_regular_pushout_tentative = false;",
+            "bool feedback_window_trace = false;",
+        ):
+            self.assertIn(declaration, self.main_cpp)
+        for option in (
+            "-rxcredit-regular-first",
+            "-tentative-probe-interval",
+            "-rxregular-hopprio",
+            "-rxregular-hopweights",
+            "-feedback-regular-grace-us",
+            "-rxcredit-regular-pushout-tentative",
+        ):
+            self.assertIn(option, self.main_cpp)
+        select = function_body(self.queue_cpp, "inline int CreditQueue::next_cred")
+        self.assertIn("selectRegularCredit(commit_selection)", select)
+        self.assertIn("tentative_probe", select)
+        self.assertIn("_regular_backlogged_slots_since_probe", select)
+        self.assertIn(
+            "rx_hop_weights_set = true;",
+            self.main_cpp.split('-rxregular-hopweights')[0],
+        )
+        regular_weights = self.main_cpp.split('-rxregular-hopweights', 1)[1]
+        self.assertIn("rx_regular_hop_weights_set = true;", regular_weights)
+
+    def test_slot_audit_snapshots_selection_time_and_physical_clock(self):
+        begin = function_body(self.queue_cpp, "void CreditQueue::beginService")
+        update = function_body(
+            self.queue_cpp, "void CreditQueue::updateAvailCredit"
+        )
+        complete = function_body(
+            self.queue_cpp, "void NICCreditQueue::completeService"
+        )
+        self.assertIn("pendingCreditCounts(&_selected_regular_pending", begin)
+        self.assertIn("_total_nic_credit_opportunities += new_cred", update)
+        self.assertIn(
+            "selected_regular_pending = _selected_regular_pending", complete
+        )
+
+    def test_receiver_experiment_has_full_phase_matrix(self):
+        self.assertIn("SEEDS=1,2,3,4,5", self.receiver_run)
+        for mode in (
+            "A0", "A1", "B0", "B1", "C1", "C2", "C3",
+            "D1", "D2", "E1", "E2", "E3", "F1",
+        ):
+            self.assertIn(mode, self.receiver_run)
+        self.assertIn("LONG_FLOW_MIB=16", self.receiver_run)
+        self.assertIn("-rxcreditaudit", self.receiver_run)
+        self.assertIn("Selected probe interval", self.receiver_run)
+        self.assertIn("flows_spanning_3_cycles_ratio", self.receiver_run)
 
 
 if __name__ == "__main__":

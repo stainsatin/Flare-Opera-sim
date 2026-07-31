@@ -136,18 +136,69 @@ NIC_SLOT_FIELDS = (
     "time_ps",
     "host_id",
     "slice",
+    "regular_pending",
+    "tentative_pending",
+    "regular_high_pending",
+    "regular_medium_pending",
+    "regular_low_pending",
     "selected_credit_type",
     "selected_priority_class",
     "selected_flow_id",
     "selected_hops",
-    "high_queue_length",
-    "medium_queue_length",
-    "low_queue_length",
-    "total_queue_length",
-    "regular_pending_count",
-    "tentative_pending_count",
+    "queue_total",
+    "regular_queue_total",
+    "tentative_queue_total",
+    "regular_oldest_age_ps",
+    "tentative_oldest_age_ps",
+    "selection_reason",
     "wrr_schedule_position",
     "fallback_occurred",
+)
+FEEDBACK_WINDOW_FIELDS = (
+    "time_ps",
+    "host_id",
+    "flow_id",
+    "window_id",
+    "slice",
+    "crt_rate_before",
+    "crt_rate_after",
+    "max_rate",
+    "regular_issued_in_window",
+    "regular_returned_in_window",
+    "regular_outstanding_at_window_end",
+    "regular_eventually_delivered_from_window",
+    "regular_permanently_dropped_from_window",
+    "tentative_issued_in_window",
+    "tentative_returned_in_window",
+    "tentative_dropped_in_window",
+    "computed_feedback_loss",
+    "final_actual_regular_loss",
+    "target_loss",
+    "feedback_sample_size",
+    "feedback_reported_lost_regular",
+    "false_loss_count",
+    "false_loss_ratio",
+    "controller_regular_issued",
+    "controller_regular_returned",
+    "regular_unresolved_at_sim_end",
+)
+FEEDBACK_WINDOW_FLOAT_FIELDS = {
+    "computed_feedback_loss",
+    "final_actual_regular_loss",
+    "target_loss",
+    "false_loss_ratio",
+}
+REGULAR_WRR_TRACE_FIELDS = (
+    "time_ps",
+    "host_id",
+    "slice",
+    "scheduled_class",
+    "selected_class",
+    "high_nonempty",
+    "medium_nonempty",
+    "low_nonempty",
+    "fallback_occurred",
+    "wrr_position",
 )
 TENTATIVE_ADMISSION_FIELDS = (
     "time_ps",
@@ -288,6 +339,42 @@ def write_csv(path, rows, fieldnames):
         writer.writerows(rows)
 
 
+def write_credit_funnel_svg(path, rows):
+    by_type = defaultdict(list)
+    for row in rows:
+        by_type[row["credit_type"]].append(row)
+    width, height = 1000, 430
+    colors = {"regular": "#15803D", "tentative": "#B45309"}
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#FFFFFF"/>',
+        '<style>text{font-family:Arial,sans-serif;fill:#111827}.title{font-size:20px;font-weight:700}.label{font-size:12px}.count{font-size:12px;font-weight:700;fill:#FFFFFF}</style>',
+    ]
+    for panel, credit_type in enumerate(("regular", "tentative")):
+        center = 250 + panel * 500
+        parts.append(
+            f'<text class="title" x="{center}" y="30" text-anchor="middle">{credit_type.title()} Credit</text>'
+        )
+        selected = by_type.get(credit_type, [])
+        generated = selected[0]["count"] if selected else 0
+        for index, row in enumerate(selected):
+            ratio = row["count"] / generated if generated else 0
+            bar_width = max(40, 390 * ratio)
+            x = center - bar_width / 2
+            y = 55 + index * 70
+            parts.append(
+                f'<rect x="{x:.2f}" y="{y}" width="{bar_width:.2f}" height="42" rx="3" fill="{colors[credit_type]}"/>'
+            )
+            parts.append(
+                f'<text class="count" x="{center}" y="{y + 25}" text-anchor="middle">{row["count"]:,} ({ratio:.1%})</text>'
+            )
+            parts.append(
+                f'<text class="label" x="{center}" y="{y + 58}" text-anchor="middle">{row["stage"].replace("_", " ")}</text>'
+            )
+    parts.append("</svg>")
+    path.write_text("\n".join(parts) + "\n", encoding="ascii")
+
+
 def safe_ratio(numerator, denominator):
     return numerator / denominator if denominator else ""
 
@@ -354,6 +441,8 @@ def parse_log(path):
     type_class_stats = []
     lifecycle_stats = []
     credit_time_series = []
+    feedback_windows = []
+    regular_wrr_stats = defaultdict(int)
     nic_slot_totals = defaultdict(int)
     tentative_admission_totals = defaultdict(int)
     unfinished_markers = set()
@@ -372,18 +461,31 @@ def parse_log(path):
         admission_stream, fieldnames=TENTATIVE_ADMISSION_FIELDS
     )
     admission_writer.writeheader()
+    feedback_stream = (path.parent / "feedback_window_trace.csv").open(
+        "w", newline="", encoding="utf-8"
+    )
+    feedback_writer = csv.DictWriter(
+        feedback_stream, fieldnames=FEEDBACK_WINDOW_FIELDS
+    )
+    feedback_writer.writeheader()
+    wrr_stream = (path.parent / "regular_wrr_trace.csv").open(
+        "w", newline="", encoding="utf-8"
+    )
+    wrr_writer = csv.DictWriter(wrr_stream, fieldnames=REGULAR_WRR_TRACE_FIELDS)
+    wrr_writer.writeheader()
 
     with path.open(encoding="utf-8", errors="replace") as stream:
         for line in stream:
             fields = line.split()
             if not fields:
                 continue
-            if fields[0] == "NICCreditSlot" and len(fields) >= 16:
-                record = dict(zip(NIC_SLOT_FIELDS, fields[1:16]))
+            if fields[0] == "NICCreditSlot" and len(fields) >= 21:
+                record = dict(zip(NIC_SLOT_FIELDS, fields[1:21]))
                 for name in NIC_SLOT_FIELDS:
                     if name not in {
                         "selected_credit_type",
                         "selected_priority_class",
+                        "selection_reason",
                     }:
                         record[name] = int(record[name])
                 slot_writer.writerow(record)
@@ -391,6 +493,93 @@ def parse_log(path):
                 nic_slot_totals[record["selected_credit_type"]] += 1
                 nic_slot_totals[record["selected_priority_class"]] += 1
                 nic_slot_totals["fallback"] += record["fallback_occurred"]
+                if record["regular_pending"]:
+                    nic_slot_totals["slots_with_regular_pending"] += 1
+                    if record["selected_credit_type"] == "regular":
+                        nic_slot_totals[
+                            "regular_selected_while_regular_pending"
+                        ] += 1
+                    else:
+                        nic_slot_totals[
+                            "tentative_selected_while_regular_pending"
+                        ] += 1
+                if record["selection_reason"] == "tentative_probe":
+                    nic_slot_totals["tentative_probe_slots"] += 1
+            elif fields[0] == "NICCreditSlot" and len(fields) >= 16:
+                old_names = (
+                    "time_ps", "host_id", "slice", "selected_credit_type",
+                    "selected_priority_class", "selected_flow_id",
+                    "selected_hops", "regular_high_pending",
+                    "regular_medium_pending", "regular_low_pending",
+                    "queue_total", "regular_pending", "tentative_pending",
+                    "wrr_schedule_position", "fallback_occurred",
+                )
+                old = dict(zip(old_names, fields[1:16]))
+                record = {name: 0 for name in NIC_SLOT_FIELDS}
+                record.update(old)
+                record["regular_queue_total"] = old["regular_pending"]
+                record["tentative_queue_total"] = old["tentative_pending"]
+                record["selection_reason"] = "fifo_head"
+                for name in NIC_SLOT_FIELDS:
+                    if name not in {
+                        "selected_credit_type",
+                        "selected_priority_class",
+                        "selection_reason",
+                    }:
+                        record[name] = int(record[name])
+                slot_writer.writerow(record)
+                nic_slot_totals["total"] += 1
+                nic_slot_totals[record["selected_credit_type"]] += 1
+                nic_slot_totals[record["selected_priority_class"]] += 1
+                nic_slot_totals["fallback"] += record["fallback_occurred"]
+            elif fields[0] == "NICCreditSlotStats" and len(fields) >= 9:
+                values = list(map(int, fields[2:9]))
+                for name, value in zip(
+                    (
+                        "total_opportunities",
+                        "used",
+                        "idle",
+                        "slots_with_regular_pending_aggregate",
+                        "regular_selected_aggregate",
+                        "tentative_selected_aggregate",
+                        "tentative_probe_slots_aggregate",
+                    ),
+                    values,
+                ):
+                    nic_slot_totals[name] += value
+            elif fields[0] == "FeedbackWindowTrace" and len(fields) >= 24:
+                values = fields[1 : 1 + len(FEEDBACK_WINDOW_FIELDS)]
+                record = dict(zip(FEEDBACK_WINDOW_FIELDS, values))
+                # Logs produced before the exact-cohort audit split do not
+                # include these two controller-counter columns.
+                record.setdefault(
+                    "controller_regular_issued",
+                    record["regular_issued_in_window"],
+                )
+                record.setdefault(
+                    "controller_regular_returned",
+                    record["regular_returned_in_window"],
+                )
+                record.setdefault("regular_unresolved_at_sim_end", 0)
+                for name in FEEDBACK_WINDOW_FIELDS:
+                    converter = float if name in FEEDBACK_WINDOW_FLOAT_FIELDS else int
+                    record[name] = converter(record[name])
+                feedback_windows.append(record)
+                feedback_writer.writerow(record)
+            elif fields[0] == "RegularWRRTrace" and len(fields) >= 11:
+                record = dict(zip(REGULAR_WRR_TRACE_FIELDS, fields[1:11]))
+                for name in REGULAR_WRR_TRACE_FIELDS:
+                    record[name] = int(record[name])
+                names = ("high", "medium", "low")
+                record["scheduled_class"] = names[record["scheduled_class"]]
+                record["selected_class"] = names[record["selected_class"]]
+                wrr_writer.writerow(record)
+            elif fields[0] == "RegularWRRStats" and len(fields) >= 14:
+                values = list(map(int, fields[2:14]))
+                for prefix, offset in (("weight", 0), ("scheduled", 3),
+                                       ("selected", 6), ("fallback", 9)):
+                    for index, name in enumerate(("high", "medium", "low")):
+                        regular_wrr_stats[f"{prefix}_{name}"] += values[offset + index]
             elif fields[0] == "TentativeAdmission" and len(fields) >= 13:
                 record = dict(zip(TENTATIVE_ADMISSION_FIELDS, fields[1:13]))
                 for name in TENTATIVE_ADMISSION_FIELDS:
@@ -587,6 +776,8 @@ def parse_log(path):
 
     slot_stream.close()
     admission_stream.close()
+    feedback_stream.close()
+    wrr_stream.close()
 
     if not queue_rows:
         raise RuntimeError(
@@ -616,6 +807,8 @@ def parse_log(path):
         "type_class_stats": type_class_stats,
         "lifecycle_stats": lifecycle_stats,
         "credit_time_series": credit_time_series,
+        "feedback_windows": feedback_windows,
+        "regular_wrr_stats": dict(regular_wrr_stats),
         "nic_slot_totals": dict(nic_slot_totals),
         "tentative_admission_totals": dict(tentative_admission_totals),
         "unfinished_markers": unfinished_markers,
@@ -997,6 +1190,103 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         )
     )
     total_nic_credit_sent = regular_sent + tentative_sent
+    regular_endpoint_drop = lifecycle_sum("regular", "endpoint_drop")
+    tentative_endpoint_drop = lifecycle_sum("tentative", "endpoint_drop")
+    regular_path_drop = lifecycle_sum("regular", "path_drop")
+    tentative_path_drop = lifecycle_sum("tentative", "path_drop")
+
+    slot_totals = parsed.get("nic_slot_totals", {})
+    total_nic_credit_slots = slot_totals.get(
+        "total_opportunities", slot_totals.get("total", total_nic_credit_sent)
+    )
+    used_nic_credit_slots = slot_totals.get(
+        "used", slot_totals.get("total", total_nic_credit_sent)
+    )
+    idle_nic_credit_slots = slot_totals.get(
+        "idle", max(total_nic_credit_slots - used_nic_credit_slots, 0)
+    )
+    slots_with_regular_pending = slot_totals.get(
+        "slots_with_regular_pending_aggregate",
+        slot_totals.get("slots_with_regular_pending", 0),
+    )
+    regular_selected_while_regular_pending = slot_totals.get(
+        "regular_selected_aggregate",
+        slot_totals.get("regular_selected_while_regular_pending", 0),
+    )
+    tentative_selected_while_regular_pending = slot_totals.get(
+        "tentative_selected_aggregate",
+        slot_totals.get("tentative_selected_while_regular_pending", 0),
+    )
+    tentative_probe_slots = slot_totals.get(
+        "tentative_probe_slots_aggregate",
+        slot_totals.get("tentative_probe_slots", 0),
+    )
+
+    def mean_type_hops(credit_type, stage):
+        selected = [
+            row
+            for row in credit_hop_stats
+            if row.get("credit_type") == credit_type
+            and "hops" in row
+            and stage in row
+        ]
+        denominator = sum(row[stage] for row in selected)
+        if not denominator:
+            return ""
+        if stage == "delivered":
+            numerator = sum(
+                row.get("delivered_actual_hops", row["hops"] * row[stage])
+                for row in selected
+            )
+        else:
+            numerator = sum(
+                row["hops"] * row[stage] for row in selected
+            )
+        return numerator / denominator
+
+    feedback_windows = parsed.get("feedback_windows", [])
+    feedback_false_loss_count = sum(
+        row["false_loss_count"] for row in feedback_windows
+    )
+    feedback_reported_lost = sum(
+        row["feedback_reported_lost_regular"] for row in feedback_windows
+    )
+    feedback_unresolved = sum(
+        row["regular_unresolved_at_sim_end"] for row in feedback_windows
+    )
+
+    def feedback_mean(field):
+        return (
+            statistics.fmean(row[field] for row in feedback_windows)
+            if feedback_windows
+            else ""
+        )
+
+    uplink_type_rows = [
+        row
+        for row in type_class_stats
+        if row["scope"] == "tor" and row["port"] >= hosts_per_tor
+    ]
+    downlink_type_rows = [
+        row
+        for row in type_class_stats
+        if row["scope"] == "tor" and row["port"] < hosts_per_tor
+    ]
+    uplink_drop_by_port = defaultdict(int)
+    rotor_drop_by_type = {
+        "regular": defaultdict(int),
+        "tentative": defaultdict(int),
+    }
+    for row in uplink_type_rows:
+        uplink_drop_by_port[(row["id"], row["port"])] += row["dropped"]
+        rotor_drop_by_type[row["credit_type"]][
+            row["port"] - hosts_per_tor
+        ] += row["dropped"]
+    wrr_stats = parsed.get("regular_wrr_stats", {})
+    wrr_selected_total = sum(
+        wrr_stats.get(f"selected_{name}", 0)
+        for name in ("high", "medium", "low")
+    )
 
     tor_active_goodputs = []
     for tor in sorted({row["source_tor"] for row in flow_rows}):
@@ -1154,13 +1444,32 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         "generated_credits": generated,
         "admitted_credits": admitted,
         "regular_generated": regular_generated,
+        "regular_endpoint_drop": regular_endpoint_drop,
         "regular_admitted": regular_admitted,
         "regular_sent": regular_sent,
+        "regular_path_drop": regular_path_drop,
         "regular_delivered": regular_delivered,
         "tentative_generated": tentative_generated,
+        "tentative_endpoint_drop": tentative_endpoint_drop,
         "tentative_admitted": tentative_admitted,
         "tentative_sent": tentative_sent,
+        "tentative_path_drop": tentative_path_drop,
         "tentative_delivered": tentative_delivered,
+        "total_nic_credit_slots": total_nic_credit_slots,
+        "used_nic_credit_slots": used_nic_credit_slots,
+        "slots_with_regular_pending": slots_with_regular_pending,
+        "regular_selected_while_regular_pending": (
+            regular_selected_while_regular_pending
+        ),
+        "tentative_selected_while_regular_pending": (
+            tentative_selected_while_regular_pending
+        ),
+        "tentative_stealing_ratio": safe_ratio(
+            tentative_selected_while_regular_pending,
+            slots_with_regular_pending,
+        ),
+        "tentative_probe_slots": tentative_probe_slots,
+        "idle_slots": idle_nic_credit_slots,
         "regular_delivered_per_generated": (
             regular_delivered / regular_generated if regular_generated else 0.0
         ),
@@ -1175,12 +1484,30 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         ),
         "regular_delivered_rate": regular_delivered / simtime_s,
         "regular_delivered_per_nic_slot": (
-            regular_delivered / total_nic_credit_sent
-            if total_nic_credit_sent
+            regular_delivered / used_nic_credit_slots
+            if used_nic_credit_slots
             else 0.0
+        ),
+        "regular_delivered_per_used_nic_slot": (
+            regular_delivered / used_nic_credit_slots
+            if used_nic_credit_slots
+            else 0.0
+        ),
+        "total_delivered_per_used_nic_slot": (
+            delivered / used_nic_credit_slots if used_nic_credit_slots else 0.0
         ),
         "regular_delivered_per_credit_hop": (
             regular_delivered / total_credit_network_hops
+            if total_credit_network_hops
+            else 0.0
+        ),
+        "regular_delivered_per_credit_network_hop": (
+            regular_delivered / total_credit_network_hops
+            if total_credit_network_hops
+            else 0.0
+        ),
+        "total_delivered_per_credit_network_hop": (
+            delivered / total_credit_network_hops
             if total_credit_network_hops
             else 0.0
         ),
@@ -1188,6 +1515,47 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
             total_credit_network_hops / regular_delivered
             if regular_delivered
             else ""
+        ),
+        "credit_network_hops_per_regular_delivered": (
+            total_credit_network_hops / regular_delivered
+            if regular_delivered
+            else ""
+        ),
+        "tentative_delivered_per_tentative_slot": (
+            tentative_delivered / tentative_sent if tentative_sent else 0.0
+        ),
+        "regular_generated_mean_hops": mean_type_hops("regular", "generated"),
+        "regular_admitted_mean_hops": mean_type_hops("regular", "admitted"),
+        "regular_delivered_mean_hops": mean_type_hops("regular", "delivered"),
+        "tentative_generated_mean_hops": mean_type_hops(
+            "tentative", "generated"
+        ),
+        "tentative_admitted_mean_hops": mean_type_hops(
+            "tentative", "admitted"
+        ),
+        "tentative_delivered_mean_hops": mean_type_hops(
+            "tentative", "delivered"
+        ),
+        "mean_configured_crt_rate": (
+            statistics.fmean(
+                row["crt_rate_after"] / row["max_rate"]
+                for row in feedback_windows
+                if row["max_rate"]
+            )
+            if any(row["max_rate"] for row in feedback_windows)
+            else ""
+        ),
+        "mean_feedback_loss": feedback_mean("computed_feedback_loss"),
+        "mean_final_regular_loss": feedback_mean(
+            "final_actual_regular_loss"
+        ),
+        "feedback_false_loss_count": feedback_false_loss_count,
+        "feedback_false_loss_ratio": safe_ratio(
+            feedback_false_loss_count, feedback_reported_lost
+        ),
+        "feedback_regular_unresolved_at_sim_end": feedback_unresolved,
+        "mean_regular_feedback_sample_size": feedback_mean(
+            "feedback_sample_size"
         ),
         "tentative_nic_slot_share": (
             tentative_sent / total_nic_credit_sent if total_nic_credit_sent else 0.0
@@ -1283,6 +1651,27 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         ),
     }
 
+    # Unit-bearing names above remain the stable interface for existing
+    # scripts. These aliases match the receiver-credit experiment schema.
+    summary.update(
+        {
+            "mean_fct": summary["mean_fct_ms"],
+            "median_fct": summary["median_fct_ms"],
+            "p95_fct": summary["p95_fct_ms"],
+            "p99_fct": summary["p99_fct_ms"],
+            "max_fct": summary["max_fct_ms"],
+            "active_makespan": summary["active_makespan_ms"],
+            "active_throughput": summary[
+                "active_makespan_throughput_gbps"
+            ],
+            "flow_jain": summary["flow_goodput_jain"],
+            "tor_jain": summary["tor_goodput_jain"],
+            "data_drop": summary["known_data_drops"],
+            "topology_clip": summary["topology_clipped_data"],
+            "wrong_destination": summary["topology_wrong_dst_data"],
+        }
+    )
+
     for credit_type in ("regular", "tentative"):
         for priority_class in ("high", "medium", "low"):
             for stage in (
@@ -1324,6 +1713,55 @@ def build_summary(flow_rows, queue_rows, parsed, simtime_s, hosts_per_tor, cycle
         and row["port"] >= hosts_per_tor
         and row["credit_type"] == "tentative"
     )
+    summary["tor_uplink_regular_drop"] = sum(
+        row["dropped"]
+        for row in uplink_type_rows
+        if row["credit_type"] == "regular"
+    )
+    summary["tor_uplink_tentative_drop"] = sum(
+        row["dropped"]
+        for row in uplink_type_rows
+        if row["credit_type"] == "tentative"
+    )
+    summary["tor_downlink_regular_drop"] = sum(
+        row["dropped"]
+        for row in downlink_type_rows
+        if row["credit_type"] == "regular"
+    )
+    summary["tor_downlink_tentative_drop"] = sum(
+        row["dropped"]
+        for row in downlink_type_rows
+        if row["credit_type"] == "tentative"
+    )
+    summary["per_rotor_regular_drop"] = ";".join(
+        f"{rotor}:{rotor_drop_by_type['regular'][rotor]}"
+        for rotor in sorted(rotor_drop_by_type["regular"])
+    )
+    summary["per_rotor_tentative_drop"] = ";".join(
+        f"{rotor}:{rotor_drop_by_type['tentative'][rotor]}"
+        for rotor in sorted(rotor_drop_by_type["tentative"])
+    )
+    summary["max_single_uplink_drop"] = max(
+        uplink_drop_by_port.values(), default=0
+    )
+    summary["uplink_drop_jain"] = jain_fairness(
+        list(uplink_drop_by_port.values())
+    )
+    for priority_class in ("high", "medium", "low"):
+        weight_total = sum(
+            wrr_stats.get(f"weight_{name}", 0)
+            for name in ("high", "medium", "low")
+        )
+        summary[f"configured_{priority_class}_share"] = safe_ratio(
+            wrr_stats.get(f"weight_{priority_class}", 0), weight_total
+        )
+        summary[f"actual_{priority_class}_share"] = safe_ratio(
+            wrr_stats.get(f"selected_{priority_class}", 0),
+            wrr_selected_total,
+        )
+        summary[f"{priority_class}_fallback_count"] = wrr_stats.get(
+            f"fallback_{priority_class}", 0
+        )
     summary["nic_slot_fallback_ratio"] = (
         parsed.get("nic_slot_totals", {}).get("fallback", 0)
         / parsed.get("nic_slot_totals", {}).get("total", 0)
@@ -1541,11 +1979,39 @@ def main():
         parsed["type_class_stats"], args.hosts_per_tor
     )
     rotor_credit_rows = build_rotor_credit_rows(uplink_credit_rows)
+    funnel_rows = []
+    for credit_type in ("regular", "tentative"):
+        generated_count = summary[f"{credit_type}_generated"]
+        admitted_count = summary[f"{credit_type}_admitted"]
+        sent_count = summary[f"{credit_type}_sent"]
+        path_drop_count = summary[f"{credit_type}_path_drop"]
+        delivered_count = summary[f"{credit_type}_delivered"]
+        for stage, count in (
+            ("generated", generated_count),
+            ("endpoint_admitted", admitted_count),
+            ("nic_sent", sent_count),
+            ("tor_path_survived", max(sent_count - path_drop_count, 0)),
+            ("sender_delivered", delivered_count),
+        ):
+            funnel_rows.append(
+                {
+                    "credit_type": credit_type,
+                    "stage": stage,
+                    "count": count,
+                    "share_of_generated": safe_ratio(count, generated_count),
+                }
+            )
 
     write_csv(args.results / "summary.csv", [summary], list(summary))
     write_csv(args.results / "per_flow.csv", flow_rows, list(flow_rows[0]))
     write_csv(args.results / "per_queue.csv", parsed["queues"], list(parsed["queues"][0]))
     write_csv(args.results / "per_tor.csv", tor_rows, list(tor_rows[0]))
+    write_csv(
+        args.results / "credit_funnel.csv",
+        funnel_rows,
+        ["credit_type", "stage", "count", "share_of_generated"],
+    )
+    write_credit_funnel_svg(args.results / "credit_funnel.svg", funnel_rows)
     write_csv(
         args.results / "per_priority_queue.csv",
         parsed["priority_queues"],
@@ -1659,10 +2125,14 @@ def main():
     print(f"Wrote {args.results / 'per_flow.csv'}")
     print(f"Wrote {args.results / 'per_queue.csv'}")
     print(f"Wrote {args.results / 'per_tor.csv'}")
+    print(f"Wrote {args.results / 'credit_funnel.csv'}")
+    print(f"Wrote {args.results / 'credit_funnel.svg'}")
     print(f"Wrote {args.results / 'per_priority_queue.csv'}")
     print(f"Wrote {args.results / 'per_credit_hop.csv'}")
     print(f"Wrote {args.results / 'flow_credit_scheduler.csv'}")
     print(f"Wrote {args.results / 'per_nic_credit_slot.csv'}")
+    print(f"Wrote {args.results / 'feedback_window_trace.csv'}")
+    print(f"Wrote {args.results / 'regular_wrr_trace.csv'}")
     print(f"Wrote {args.results / 'tentative_admission.csv'}")
     print(f"Wrote {args.results / 'credit_lifecycle.csv'}")
     print(f"Wrote {args.results / 'per_tor_uplink_credit.csv'}")

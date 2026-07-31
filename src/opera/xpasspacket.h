@@ -38,6 +38,7 @@ public:
     p->_src = src;
     p->_dst = dst;
     p->_tentative = false;
+    p->_feedback_window_id = 0;
     p->_unsched = false;
     p->_ackreq = false;
     p->_xpsrc = xpsrc;
@@ -60,6 +61,8 @@ public:
   inline void set_ts(simtime_picosec ts) {_ts = ts;}
   void set_tentative(bool tentative) {_tentative = tentative;}
   bool tentative() {return _tentative;}
+  void set_feedback_window_id(uint64_t window_id) {_feedback_window_id = window_id;}
+  uint64_t feedback_window_id() const {return _feedback_window_id;}
   void set_unsched(bool unsched) {_unsched = unsched;}
   bool unsched() {return _unsched;}
   void set_ackreq(bool ackreq) {_ackreq = ackreq;}
@@ -77,6 +80,7 @@ protected:
   bool _retransmitted;
   bool _last_packet;  // set to true in the last packet in a flow.
   bool _tentative;
+  uint64_t _feedback_window_id;
   bool _unsched;
   bool _ackreq;
   static PacketDB<XPassPacket> _packetdb;
@@ -97,6 +101,8 @@ public:
     p->_tentative = false;
     p->_prio = false;
     p->_credit_enqueue_seq = 0;
+    p->_credit_enqueue_time = 0;
+    p->_feedback_window_id = 0;
     p->_generation_superslice = -1;
     p->_queueing = 0;
     return p;
@@ -114,6 +120,10 @@ public:
   bool prio() {return _prio;}
   void set_credit_enqueue_seq(uint64_t sequence) {_credit_enqueue_seq = sequence;}
   uint64_t credit_enqueue_seq() const {return _credit_enqueue_seq;}
+  void set_credit_enqueue_time(simtime_picosec time) {_credit_enqueue_time = time;}
+  simtime_picosec credit_enqueue_time() const {return _credit_enqueue_time;}
+  void set_feedback_window_id(uint64_t window_id) {_feedback_window_id = window_id;}
+  uint64_t feedback_window_id() const {return _feedback_window_id;}
   void set_generation_superslice(int64_t superslice) {
     _generation_superslice = superslice;
   }
@@ -135,6 +145,8 @@ protected:
   bool _tentative;
   bool _prio;
   uint64_t _credit_enqueue_seq;
+  simtime_picosec _credit_enqueue_time;
+  uint64_t _feedback_window_id;
   int64_t _generation_superslice;
   static PacketDB<XPassPull> _packetdb;
 };

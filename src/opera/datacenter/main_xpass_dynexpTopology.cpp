@@ -58,6 +58,8 @@ void report_credit_stats(DynExpTopology* top) {
         queue->reportCreditStats("host", host, -1);
         queue->reportPriorityStats("host", host, -1);
         queue->reportTypeClassStats("host", host, -1);
+        queue->reportNICSlotStats();
+        queue->reportRegularWRRStats();
         cout << "DataQueueStats host " << host << " -1 "
              << queue->num_drops() << " "
              << queue->max_ever_recorded_size() << " "
@@ -81,6 +83,7 @@ void report_credit_stats(DynExpTopology* top) {
     reportCreditHopStats();
     reportCreditLifecycleStats();
     reportCreditTimeSeriesStats();
+    reportFeedbackWindowTrace();
     cout << "# TopologyClipStats credit data control other" << endl;
     cout << "TopologyClipStats " << __global_topology_clipped_credits << " "
          << __global_topology_clipped_data << " "
@@ -141,12 +144,21 @@ int main(int argc, char **argv) {
     bool rx_credit_pushout = false;
     bool rx_credit_slot_trace = false;
     bool rx_credit_time_series = false;
+    bool feedback_window_trace = false;
+    bool rx_regular_first = false;
+    bool rx_regular_hop_prio = false;
+    bool rx_regular_pushout_tentative = false;
+    bool feedback_ignore_tentative_drop = false;
+    uint32_t tentative_probe_interval = 0;
+    bool tentative_probe_set = false;
+    double feedback_regular_grace_us = 0.0;
     bool deprecated_rx_prio_admit = false;
     uint32_t random_seed = 13;
     uint32_t rx_hop_weight_high = 4;
     uint32_t rx_hop_weight_medium = 2;
     uint32_t rx_hop_weight_low = 1;
     bool rx_hop_weights_set = false;
+    bool rx_regular_hop_weights_set = false;
     int jit_a = -1; //jittering K value
     int jit_b = -1; //jittering K value
     double fb_w_factor = 2.0; //weight adjustment factor
@@ -207,6 +219,42 @@ int main(int argc, char **argv) {
 	    rx_credit_slot_trace = true;
 	} else if (!strcmp(argv[i],"-rxcredittimeseries")){
 	    rx_credit_time_series = true;
+	} else if (!strcmp(argv[i],"-rxcreditaudit")){
+	    rx_credit_slot_trace = true;
+	    rx_credit_time_series = true;
+        feedback_window_trace = true;
+	} else if (!strcmp(argv[i],"-feedbackwindowtrace")){
+        feedback_window_trace = true;
+	} else if (!strcmp(argv[i],"-rxcredit-regular-first")){
+        rx_regular_first = true;
+	} else if (!strcmp(argv[i],"-tentative-probe-interval")){
+        if (i + 1 >= argc) {
+            cout << "-tentative-probe-interval requires a non-negative integer"
+                 << endl;
+            exit(1);
+        }
+        int value = atoi(argv[i+1]);
+        if (value < 0) {
+            cout << "-tentative-probe-interval must be non-negative" << endl;
+            exit(1);
+        }
+        tentative_probe_interval = value;
+        tentative_probe_set = true;
+        i++;
+	} else if (!strcmp(argv[i],"-rxregular-hopprio")){
+        rx_regular_hop_prio = true;
+	} else if (!strcmp(argv[i],"-rxcredit-regular-pushout-tentative")){
+        rx_regular_pushout_tentative = true;
+	} else if (!strcmp(argv[i],"-feedback-ignore-tentative-drop")){
+        feedback_ignore_tentative_drop = true;
+	} else if (!strcmp(argv[i],"-feedback-regular-grace-us")){
+        if (i + 1 >= argc || atof(argv[i+1]) < 0) {
+            cout << "-feedback-regular-grace-us requires a non-negative value"
+                 << endl;
+            exit(1);
+        }
+        feedback_regular_grace_us = atof(argv[i+1]);
+        i++;
 	} else if (!strcmp(argv[i],"-seed")){
         if (i + 1 >= argc) {
             cout << "-seed requires a non-negative integer" << endl;
@@ -238,6 +286,25 @@ int main(int argc, char **argv) {
         rx_hop_weight_medium = medium;
         rx_hop_weight_low = low;
         rx_hop_weights_set = true;
+        i += 3;
+	} else if (!strcmp(argv[i],"-rxregular-hopweights")){
+        if (i + 3 >= argc) {
+            cout << "-rxregular-hopweights requires three values: high medium low"
+                 << endl;
+            exit(1);
+        }
+        int high = atoi(argv[i+1]);
+        int medium = atoi(argv[i+2]);
+        int low = atoi(argv[i+3]);
+        if (high <= 0 || medium <= 0 || low <= 0) {
+            cout << "-rxregular-hopweights values must be greater than zero"
+                 << endl;
+            exit(1);
+        }
+        rx_hop_weight_high = high;
+        rx_hop_weight_medium = medium;
+        rx_hop_weight_low = low;
+        rx_regular_hop_weights_set = true;
         i += 3;
 	} else if (!strcmp(argv[i],"-probfile")) {
 		string probfile = argv[i+1];
@@ -279,6 +346,20 @@ int main(int argc, char **argv) {
         cout << "-rxhopweights requires -rxhopprio" << endl;
         exit(1);
     }
+    if (rx_regular_hop_weights_set && !rx_regular_hop_prio) {
+        cout << "-rxregular-hopweights requires -rxregular-hopprio" << endl;
+        exit(1);
+    }
+    if (rx_hop_prio && rx_regular_hop_prio) {
+        cout << "Legacy and Regular-only hop priority cannot be combined"
+             << endl;
+        exit(1);
+    }
+    if ((tentative_probe_set || rx_regular_hop_prio) && !rx_regular_first) {
+        cout << "Probe budgeting and Regular Hop WRR require "
+             << "-rxcredit-regular-first" << endl;
+        exit(1);
+    }
     uint64_t weight_sum = (uint64_t)rx_hop_weight_high +
                           rx_hop_weight_medium + rx_hop_weight_low;
     if (weight_sum > 100000) {
@@ -294,6 +375,22 @@ int main(int argc, char **argv) {
     if (rx_global_tentative) {
         cout << "Receiver tentative admission: global shared Credit occupancy"
              << endl;
+    }
+    if (rx_regular_first) {
+        cout << "Receiver Credit service: Regular-first FIFO; tentative probe "
+             << "interval=" << tentative_probe_interval << endl;
+    }
+    if (rx_regular_hop_prio) {
+        cout << "Receiver Regular-only hop WRR: " << rx_hop_weight_high << ":"
+             << rx_hop_weight_medium << ":" << rx_hop_weight_low << endl;
+    }
+    if (feedback_ignore_tentative_drop) {
+        cout << "Feedback diagnostic: tentative drops are explicitly excluded "
+             << "(the original counters already have this property)" << endl;
+    }
+    if (feedback_regular_grace_us > 0) {
+        cout << "Feedback Regular grace: " << feedback_regular_grace_us
+             << " us" << endl;
     }
     if (deprecated_rx_prio_admit) {
         cout << "Warning: -rxprioadmit is deprecated; it now aliases "
@@ -337,6 +434,10 @@ int main(int argc, char **argv) {
         {"rx_global_tentative",rx_global_tentative ? 1U : 0U},
         {"rx_credit_pushout",rx_credit_pushout ? 1U : 0U},
         {"rx_credit_slot_trace",rx_credit_slot_trace ? 1U : 0U},
+        {"rx_regular_first",rx_regular_first ? 1U : 0U},
+        {"tentative_probe_interval",tentative_probe_interval},
+        {"rx_regular_hop_prio",rx_regular_hop_prio ? 1U : 0U},
+        {"rx_regular_pushout_tentative",rx_regular_pushout_tentative ? 1U : 0U},
         {"priority_seed",random_seed},
         {"rx_hop_weight_high",rx_hop_weight_high},
         {"rx_hop_weight_medium",rx_hop_weight_medium},
@@ -345,6 +446,7 @@ int main(int argc, char **argv) {
         CREDIT, topfile, params);
     top->set_prob_hops(hops_to_prob);
     configureCreditTimeSeries(top, rx_credit_time_series);
+    configureFeedbackWindowTrace(feedback_window_trace);
 
     // initialize all sources/sinks
     XPassSrc::setMinRTO(1000); //increase RTO to avoid spurious retransmits
@@ -391,6 +493,10 @@ int main(int argc, char **argv) {
             flowSnk->set_jit_alpha(jit_a);
             flowSnk->set_jit_beta(jit_b);
             flowSnk->set_tp_sampling(timeFromMs(tp_sampling));
+            flowSnk->set_feedback_ignore_tentative_drop(
+                feedback_ignore_tentative_drop);
+            flowSnk->set_feedback_regular_grace(
+                (simtime_picosec)(feedback_regular_grace_us * 1000000.0));
             xpassRtxScanner.registerXPass(*flowSrc);
 
             flowSrc->connect(*flowSnk, timeFromNs(vtemp[3]/1.));

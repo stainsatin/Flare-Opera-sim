@@ -61,6 +61,21 @@ void recordCreditFeedbackWindow(DynExpTopology* top, simtime_picosec time,
                                 double measured_loss, double target_loss,
                                 double rate_before, double rate_after);
 void reportCreditTimeSeriesStats();
+void configureFeedbackWindowTrace(bool enabled);
+void recordFeedbackCreditIssue(Packet& pkt);
+void recordFeedbackCreditDrop(Packet& pkt);
+void recordFeedbackDataReturn(uint32_t flow_id, uint64_t window_id,
+                              uint64_t pacer_no, bool tentative,
+                              simtime_picosec time);
+void recordDetailedFeedbackWindow(
+    DynExpTopology* top, simtime_picosec time, uint32_t host_id,
+    uint32_t flow_id, uint64_t window_id, uint64_t rate_before,
+    uint64_t rate_after, uint64_t max_rate, uint64_t regular_issued,
+    uint64_t regular_returned, uint64_t tentative_issued,
+    uint64_t tentative_returned, uint64_t feedback_sample_size,
+    uint64_t feedback_reported_lost, double computed_loss,
+    double target_loss);
+void reportFeedbackWindowTrace();
 void recordFlowCreditDelivery(Packet& pkt);
 void recordFlowCreditTopologyDrop(Packet& pkt, uint32_t consumed_hops,
                                   bool wrong_destination = false);
@@ -93,6 +108,8 @@ class CreditQueue : public Queue {
     void reportCreditStats(const string& scope, int id, int port);
     void reportPriorityStats(const string& scope, int id, int port);
     void reportTypeClassStats(const string& scope, int id, int port);
+    void reportNICSlotStats();
+    void reportRegularWRRStats();
  protected:
     enum pkt_type {NONE, DATA, CRED};
     pkt_type _tx_next;
@@ -103,10 +120,10 @@ class CreditQueue : public Queue {
     simtime_picosec cred_tx_delta();
     bool credit_ready();
     bool receiverPriorityEnabled() const;
-    int creditClass(Packet &pkt);
+    int creditClass(Packet &pkt) const;
     int creditQueueIndex(Packet &pkt);
     int creditType(Packet &pkt) const;
-    int next_cred();
+    int next_cred(bool commit_selection = false);
     void advanceCreditPriority(int served_prio);
     void buildCreditSchedule();
     void refreshPriorityClassification();
@@ -114,6 +131,7 @@ class CreditQueue : public Queue {
                              int npaths) const;
     void installPriorityRoute(Packet &pkt, int slice);
     bool evictPriorityCredit(Packet &arriving, int arriving_class);
+    bool evictOldestTentativeCredit();
     bool evictCreditVictim(int victim_class, bool tentative);
     void accountCreditEnqueue(Packet &pkt, int queue_index, int credit_class);
     void accountCreditDequeue(Packet &pkt, int queue_index, int credit_class);
@@ -128,7 +146,18 @@ class CreditQueue : public Queue {
     void reportNICCreditSlot(Packet &pkt, int credit_class,
                              const vector<mem_b>& class_lengths,
                              uint64_t regular_pending,
-                             uint64_t tentative_pending) const;
+                             uint64_t tentative_pending,
+                             uint64_t regular_oldest_age,
+                             uint64_t tentative_oldest_age) const;
+    Packet* oldestCreditOfType(bool tentative, int* queue_index) const;
+    Packet* oldestRegularInClass(int credit_class, int* queue_index) const;
+    void moveCreditToHeadOfService(Packet* pkt, int queue_index);
+    uint64_t oldestCreditAge(bool tentative) const;
+    void pendingCreditCounts(uint64_t* regular, uint64_t* tentative,
+                             vector<mem_b>* regular_classes) const;
+    int selectRegularCredit(bool commit_selection);
+    int selectTentativeCredit();
+    bool receiverSchedulerEnabled() const;
     mem_b queuesize_cred(int prio); //queue within a certain prio
     mem_b queuesize_cred(); //full queue size
     mem_b _maxsize_cred;
@@ -158,9 +187,16 @@ class CreditQueue : public Queue {
     map<int, uint64_t> _hops_to_creds;
     bool _is_nic;
     bool _rx_hop_prio;
+    bool _rx_regular_first;
+    bool _rx_regular_hop_prio;
     bool _rx_global_tentative;
     bool _rx_credit_pushout;
+    bool _rx_regular_pushout_tentative;
     bool _rx_credit_slot_trace;
+    uint32_t _tentative_probe_interval;
+    uint32_t _regular_backlogged_slots_since_probe;
+    bool _selected_probe;
+    string _selected_reason;
     uint64_t _priority_seed;
     int _host_id;
     int _last_priority_slice;
@@ -178,6 +214,20 @@ class CreditQueue : public Queue {
     vector<mem_b> _priority_queued_bytes;
     vector<mem_b> _priority_max_queued;
     CreditClassQueueCounters _type_class_stats[2][3];
+    uint64_t _slots_with_regular_pending;
+    uint64_t _regular_selected_while_regular_pending;
+    uint64_t _tentative_selected_while_regular_pending;
+    uint64_t _tentative_probe_slots;
+    uint64_t _used_nic_credit_slots;
+    uint64_t _total_nic_credit_opportunities;
+    uint64_t _selected_regular_pending;
+    uint64_t _selected_tentative_pending;
+    vector<mem_b> _selected_regular_classes;
+    uint64_t _selected_regular_oldest_age;
+    uint64_t _selected_tentative_oldest_age;
+    uint64_t _regular_wrr_fallbacks[3];
+    uint64_t _regular_wrr_scheduled[3];
+    uint64_t _regular_wrr_selected[3];
 };
 
 class NICCreditQueue : public CreditQueue {
@@ -189,6 +239,10 @@ class NICCreditQueue : public CreditQueue {
         bool rx_global_tentative = false,
         bool rx_credit_pushout = false,
         bool rx_credit_slot_trace = false,
+        bool rx_regular_first = false,
+        uint32_t tentative_probe_interval = 0,
+        bool rx_regular_hop_prio = false,
+        bool rx_regular_pushout_tentative = false,
         uint64_t priority_seed = 13,
         uint32_t high_weight = 4, uint32_t medium_weight = 2,
         uint32_t low_weight = 1);

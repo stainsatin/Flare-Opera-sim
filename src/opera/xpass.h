@@ -103,7 +103,9 @@ class XPassSrc : public PacketSink, public EventSource {
     bool _rtx_timeout_pending;
 
     void pull_packets(XPassPull::seq_t pull_no, XPassPull::seq_t pacer_no);
-    void send_packet(XPassPull::seq_t pacer_no, int credit_slice, bool tentative, simtime_picosec ts, bool unsched, unsigned queueing);
+    void send_packet(XPassPull::seq_t pacer_no, int credit_slice,
+                     bool tentative, simtime_picosec ts, bool unsched,
+                     unsigned queueing, uint64_t feedback_window_id = 0);
 
     virtual const string& nodename() { return _nodename; }
     inline uint32_t flow_id() const { return _flow.flow_id();}
@@ -178,6 +180,12 @@ class XPassSink : public PacketSink, public EventSource, public DataReceiver {
     void set_jit_alpha(double jit_alpha) { _jit_alpha = jit_alpha; }
     void set_jit_beta(double jit_beta) { _jit_beta = jit_beta; }
     void set_tp_sampling(simtime_picosec freq) { _tp_sampling_freq = freq; }
+    void set_feedback_ignore_tentative_drop(bool enabled) {
+      _feedback_ignore_tentative_drop = enabled;
+    }
+    void set_feedback_regular_grace(simtime_picosec grace) {
+      _feedback_regular_grace = grace;
+    }
  
     XPassSrc* _src;
 
@@ -194,6 +202,8 @@ class XPassSink : public PacketSink, public EventSource, public DataReceiver {
     void updateRTT(simtime_picosec ts);
     void feedbackControl();
     void feedbackControl2();
+    void resetFeedbackAuditWindow();
+    void updateGraceFeedbackSamples();
     uint64_t inflight_data();
     uint64_t inflight_creds();
     uint64_t max_rtt_pkts();
@@ -235,6 +245,12 @@ class XPassSink : public PacketSink, public EventSource, public DataReceiver {
     uint64_t _drop_credits = 0; 
     uint64_t _tent_credits = 0;
     uint64_t _tent_credits_recvd = 0;
+    uint64_t _feedback_window_sequence = 1;
+    bool _feedback_ignore_tentative_drop = false;
+    simtime_picosec _feedback_regular_grace = 0;
+    map<uint64_t, simtime_picosec> _feedback_pending_regular;
+    uint64_t _feedback_grace_successes = 0;
+    uint64_t _feedback_grace_losses = 0;
     uint64_t _recvd_in_quantum = 0;
     uint64_t _tot_sent_in_quantum = 0;
     vector<uint64_t> _bw_sent_in_quantum;

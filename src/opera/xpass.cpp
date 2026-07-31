@@ -192,7 +192,8 @@ void XPassSrc::receivePacket(Packet& pkt)
             //cout << "TENTATIVE " << _tentative_received << " flow " << _flow_id << endl;
         }
         unsigned queueing = p->get_queueing();
-        send_packet(p->pacerno(), p->get_slice_sent(), p->tentative(), p->ts(), false, queueing);
+        send_packet(p->pacerno(), p->get_slice_sent(), p->tentative(),
+                    p->ts(), false, queueing, p->feedback_window_id());
         _last_pull++;
         pkt.free();
         return;
@@ -251,7 +252,8 @@ void XPassSrc::send_cumack_req() {
 // packets embed the corresponding credit slice.
 // if a packet is sent without a credit, slice should be set to -1.
 void XPassSrc::send_packet(XPassPull::seq_t pacer_no, int credit_slice, 
-        bool tentative, simtime_picosec ts, bool unsched, unsigned queueing) {
+        bool tentative, simtime_picosec ts, bool unsched, unsigned queueing,
+        uint64_t feedback_window_id) {
   XPassPacket* p;
   if (!_rtx_queue.empty()) {
     // There are packets in the RTX queue for us to send
@@ -262,6 +264,7 @@ void XPassSrc::send_packet(XPassPull::seq_t pacer_no, int credit_slice,
     p->set_ts(ts);
     p->set_pacerno(pacer_no);
     p->set_tentative(tentative);
+    p->set_feedback_window_id(feedback_window_id);
     p->set_flow_id(_flow_id);
     p->set_path_index(_path_index);
     p->set_queueing(queueing);
@@ -300,6 +303,7 @@ void XPassSrc::send_packet(XPassPull::seq_t pacer_no, int credit_slice,
     p->set_credit_ts(credit_slice);
     p->set_ts(eventlist().now());
     p->set_tentative(tentative);
+    p->set_feedback_window_id(feedback_window_id);
     p->set_unsched(unsched);
     p->set_flow_id(_flow_id);
     p->set_path_index(_path_index);
@@ -595,13 +599,32 @@ void XPassSink::receivePacket(Packet& pkt) {
   XPassPacket::seq_t seqno = p->seqno();
   XPassPacket::seq_t pacer_no = p->pacerno();
   simtime_picosec ts = p->ts();
+  bool tentative = p->tentative();
+  bool unscheduled = p->unsched();
+  uint64_t feedback_window_id = p->feedback_window_id();
   bool last_packet = ((XPassPacket*)&pkt)->last_packet();
   bool ack_req = p->ackreq();
-  if(!p->tentative() && !p->unsched()){
+  if(!tentative && !unscheduled){
     _tot_recvd_pkts++;
     _recvd_in_quantum++;
     _inflight_estimate = max(_inflight_estimate-1, (uint64_t)0);
+    if (_feedback_regular_grace > 0) {
+      map<uint64_t, simtime_picosec>::iterator pending =
+          _feedback_pending_regular.find(pacer_no);
+      if (pending != _feedback_pending_regular.end()) {
+        bool within_grace = eventlist().now() <
+                            pending->second + _feedback_regular_grace;
+        _feedback_pending_regular.erase(pending);
+        if (within_grace)
+          _feedback_grace_successes++;
+        else
+          _feedback_grace_losses++;
+      }
+    }
   }
+  if (!unscheduled)
+    recordFeedbackDataReturn(flow_id(), feedback_window_id, pacer_no,
+                             tentative, eventlist().now());
   //for TP sampling
   _recvd_data += p->size()-64;
   _tot_recvd_data += p->size()-64;
@@ -644,7 +667,7 @@ void XPassSink::receivePacket(Packet& pkt) {
   updateRTT(ts);
   //no update if: data from tentative credit, different route, obsolete(reordered) data
   if(!_is_flare) {
-      if(!p->tentative() && pacer_no > _last_packet_pacerno) {
+      if(!tentative && pacer_no > _last_packet_pacerno) {
           assert(pacer_no > _last_packet_pacerno);
           long distance = pacer_no - _last_packet_pacerno;
           _tot_credits += distance;
@@ -655,7 +678,7 @@ void XPassSink::receivePacket(Packet& pkt) {
           _last_packet_pacerno = pacer_no;
       }
   }
-  if(p->tentative()) {
+  if(tentative) {
     _tent_credits_recvd++;
   }
 
@@ -835,6 +858,28 @@ XPassSink::decJitter() {
     }
 }
 
+void XPassSink::resetFeedbackAuditWindow() {
+  _feedback_window_sequence++;
+}
+
+void XPassSink::updateGraceFeedbackSamples() {
+  assert(_feedback_regular_grace > 0);
+  for (map<uint64_t, simtime_picosec>::iterator it =
+           _feedback_pending_regular.begin();
+       it != _feedback_pending_regular.end();) {
+    if (it->second + _feedback_regular_grace <= eventlist().now()) {
+      _feedback_grace_losses++;
+      _feedback_pending_regular.erase(it++);
+    } else {
+      ++it;
+    }
+  }
+  _tot_credits = _feedback_grace_successes + _feedback_grace_losses;
+  _drop_credits = _feedback_grace_losses;
+  _feedback_grace_successes = 0;
+  _feedback_grace_losses = 0;
+}
+
 void
 XPassSink::feedbackControl2() {
   if(_tot_credits == 0) return;
@@ -872,6 +917,13 @@ XPassSink::feedbackControl2() {
       credit_loss, target_loss,
       (long double)rate_before / _max_rate,
       (long double)_crt_rate / _max_rate);
+  recordDetailedFeedbackWindow(
+      _src->_top, eventlist().now(), _src->_flow_dst, flow_id(),
+      _feedback_window_sequence, rate_before, _crt_rate, _max_rate,
+      _bw_sent_creds, _tot_recvd_pkts, _tent_credits,
+      _tent_credits_recvd, _tot_credits, _drop_credits,
+      credit_loss, target_loss);
+  resetFeedbackAuditWindow();
   //cout << "Flow " << flow_id() << " loss " << credit_loss << " sent " << _tot_credits << " tot_lost " << _drop_credits << " rate " << _crt_rate/1E9 <<  " hops " << _crt_hops << " t " << eventlist().now() << " rtt " << _rtt << endl;
   _tot_recvd_pkts = 0;
   _bw_sent_creds = 0;
@@ -974,6 +1026,7 @@ void XPassSink::updateSliceFeedbackState() {
         _drop_credits = 0;
         _tot_sent_creds = 0;
         _tot_sent_creds_slice = 0;
+        resetFeedbackAuditWindow();
     }
   }
 #endif
@@ -990,6 +1043,7 @@ XPassPull* XPassSink::emitCredit() {
   p->set_flow_id(_src->flow_id());
   p->set_path_index(_src->_path_index);
   p->set_packetid(id_gen++);
+  p->set_feedback_window_id(_feedback_window_sequence);
   p->set_generation_superslice(
       eventlist().now() / _src->_top->get_slicetime(3));
   double rate = 1.0;
@@ -998,6 +1052,8 @@ XPassPull* XPassSink::emitCredit() {
       if(drand() <= rate) {
           p->set_tentative(false);
           p->set_pacerno(_credit_counter++);
+          if (_feedback_regular_grace > 0)
+            _feedback_pending_regular[p->pacerno()] = eventlist().now();
           __global_network_tot_valid_creds++;
           _last_valid_cred_t = eventlist().now();
           _bw_sent_creds++; 
@@ -1018,6 +1074,7 @@ XPassPull* XPassSink::emitCredit() {
       p->set_pacerno(_credit_counter++);
       __global_network_tot_valid_creds++;
   }
+  recordFeedbackCreditIssue(*p);
   recordCreditGenerationRate(_src->_top, eventlist().now(), rate);
   sendToNIC(p);
   decJitter();
@@ -1032,7 +1089,10 @@ XPassPull* XPassSink::emitCredit() {
       _tot_credits = _bw_sent_creds;
       _drop_credits = _bw_sent_creds > _tot_recvd_pkts ?
         _bw_sent_creds-_tot_recvd_pkts : 0;
+      if (_feedback_regular_grace > 0) updateGraceFeedbackSamples();
+      bool feedback_has_samples = _tot_credits > 0;
       feedbackControl2();
+      if (!feedback_has_samples) resetFeedbackAuditWindow();
       _tot_sent_creds = 0;
       _tot_recvd_pkts = 0;
       _bw_sent_creds = 0;
